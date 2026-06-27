@@ -4,9 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目现状（重要）
 
-本仓库当前是 **LangGraph 官方 starter 模板的初始状态**：[src/agent/graph.py](src/agent/graph.py) 仅含一个返回固定字符串的单节点 `graph`。而 [docs/设计文档.md](docs/设计文档.md) 描述了一个完整的多智能体目标架构（V3 设计），**尚未落地到代码**。进行任何实现前，务必先读设计文档，并意识到代码与设计之间存在巨大鸿沟——不要把模板代码误当成已实现的系统。
+**进度**：Phase 0（骨架与前置）、Phase 1（Index Agent 与本地知识库基础设施）均已完成并存档。当前进入 Phase 2。
+
+- Phase 0 产出：`data/markdown/` 样例知识库、`prototypes/phase0_graph_probe.py`（LangGraph 链路探针）、CLAUDE.md、docs/开发计划.md、pyproject 的 prototypes ruff 忽略。`src/agent/graph.py` 仍为模板单节点占位（Phase 3 重构）。
+- Phase 1 产出：`src/index_agent/`（后台 agent，五节点图 `scan→chunk→embed→llm_index→write_index`，不进主图、不进 AgentRegistry）。行级切片（chunk metadata 带 `start_line`/`end_line`）、Chroma 单 collection `knowledge_base` 向量灌入、LLM 维护文件级语义索引 `data/index.md`（指向文件不指行）。LLM 调用方式：`bind_tools([IndexUpdate])` + auto tool_choice（DeepSeek thinking 模型不能强制 tool_choice，后端取 `tool_calls` 校验 + 未调用兜底抽 JSON）。embedding 用本地 `models/bge-small-zh-v1.5`（sentence-transformers，GPU 自动启用）。`langgraph.json` 注册了 `index_agent` 供 SDK/Studio 调试。SDK 验证脚本 `prototypes/phase1_sdk_test.py`（仿 `ref/sdk_test_ref.py`）已跑通。
+- **未落地**：[docs/设计文档.md](docs/设计文档.md) 的多智能体主图架构（V3）尚未实现，Phase 2 起逐步落地。不要把模板 `src/agent/graph.py` 当成已实现系统。
 
 目标系统定位：基于 LangGraph 的本地 MVP，做两件事——① Agent 领域知识学习问答（带本地知识库 RAG + 行级引用）；② 简历优化。详见设计文档第 1 节。
+
+各 Phase 的完整范围/验收标准见 [docs/开发计划.md](docs/开发计划.md)。
 
 ## 常用命令
 
@@ -91,9 +97,10 @@ Phase 1 混合 RAG 子图 → Phase 2 动态主图总线 → Phase 3 本地 SQLi
 1. **先有总体计划草稿**：开工前先拟定一份开发计划草稿，用户无异议后才进入分阶段实现。
 2. **每阶段实现前必须协商**：每个阶段动手写正式代码前，用「文字陈述 + 快速原型」与用户交流本阶段的实现边界和细节，**不断迭代直到所有开发细节清晰且双方无异议**，才请求用户批准开发。
 3. **快速原型隔离**：快速原型统一放入项目专用文件夹 `prototypes/`，**不得污染** `src/`、`tests/` 等正式代码目录。原型是可运行的最小验证，用于降低关键技术风险，不是正式实现。
-4. **阶段验收后才存档**：每个阶段完成且**用户验收通过后**，在用户指引下进行 git 存档（提交/打 tag）。未验收不存档，未指引不自行提交。
-5. **分阶段闭环**：每阶段固定走 边界陈述 → 原型 → 协商 → 正式实现（满足 ruff + mypy `--strict` + 测试）→ 验收 → git 存档，不跳步。
-6. **不跨阶段占位（硬性）**：开始某阶段时，**绝不为本阶段不需要、但后续阶段会用的文件/函数/模块/占位**提前创建。每阶段只产出本阶段实际需要的代码。后续阶段要用的东西，等到那个阶段再建——哪怕现在"顺手建个空文件"也不行。
-7. **依赖按需安装**：开发环境无需提前装齐。编写代码用到某个包时，**提示用户安装**（给出包名与用途），不由 Claude 自行安装。
+4. **测试用例编写准则**：不要纠结代码规范相关问题，测试用例应该精简，当发现编写测试用例的总是运行不起来，及时提问用户，是否需要这个测试，如果确实需要，那么和用户讨论编写测试用例时遇到了什么问题。
+5. **阶段验收后才存档**：每个阶段完成且**用户验收通过后**，在用户指引下进行 git 存档（提交/打 tag）。未验收不存档，未指引不自行提交。
+6. **分阶段闭环**：每阶段固定走 边界陈述 → 原型 → 协商 → 正式实现（满足 ruff + mypy `--strict` + 测试）→ 验收 → git 存档，不跳步。
+7. **不跨阶段占位（硬性）**：开始某阶段时，**绝不为本阶段不需要、但后续阶段会用的文件/函数/模块/占位**提前创建。每阶段只产出本阶段实际需要的代码。后续阶段要用的东西，等到那个阶段再建——哪怕现在"顺手建个空文件"也不行。
+8. **依赖按需安装**：开发环境无需提前装齐。编写代码用到某个包时，**提示用户安装**（给出包名与用途），不由 Claude 自行安装。
 
 > 协作铁律：宁可多协商一轮，也不要在细节未对齐时写正式代码。用户没说"开始/批准"就不动手实现。

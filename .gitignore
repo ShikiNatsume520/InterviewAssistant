@@ -130,6 +130,10 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local models & vector store (downloaded/generated, not version-controlled)
+models/
+data/chroma/
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -161,3 +165,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 .langgraph_api/
+
+# 个人参考素材，非项目产物
+ref/
