@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 
+from src.client import get_chat_model
+
 from index_agent.state import Chunk, IndexRow, IndexUpdate
 
 load_dotenv()
@@ -87,17 +89,7 @@ def build_llm() -> Runnable[Any, Any]:
     Returns:
         bind_tools 后的 Runnable（不强制 tool_choice）。
     """
-    base_url = os.environ["DEEPSEEK_API_URL"]
-    api_key = os.environ["DEEPSEEK_API_KEY"]
-    model = os.environ["DEEPSEEK_MODEL"]
-    llm = ChatOpenAI(
-        base_url=base_url,
-        api_key=api_key,  # type: ignore[arg-type]
-        model=model,
-        temperature=0.0,
-        max_completion_tokens=1500,
-    )
-    return llm.bind_tools([IndexUpdate])
+    return get_chat_model("deepseek-v4-flash", [IndexUpdate])
 
 
 async def update_index_via_llm(

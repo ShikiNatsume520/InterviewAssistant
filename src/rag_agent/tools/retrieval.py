@@ -79,18 +79,21 @@ def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def _extract_terms(query: str) -> list[str]:
-    """从 query 切出检索词（纯规则，无 jieba）。
-
-    Args:
-        query: 原始查询字符串。
-
-    Returns:
-        长度 >= 2 或含 ASCII 字母的实义词列表。
     """
-    terms: list[str] = []
-    for tok in re.findall(r"[一-鿿]+|[A-Za-z0-9_\-]+", query):
-        if len(tok) >= 2 or re.search(r"[A-Za-z]", tok):
-            terms.append(tok)
+    解析关键词查询，支持引号包裹的短语。
+    示例: ' "StateGraph 状态管理" 检查点 "tool calling" ' 
+          -> ['StateGraph 状态管理', '检查点', 'tool calling']
+    """
+    # 使用正则匹配引号内的内容，或者匹配不带引号的单词
+    pattern = r'"([^"]*)"|(\S+)'
+    matches = re.findall(pattern, query)
+    
+    terms = []
+    for quoted, unquoted in matches:
+        if quoted:
+            terms.append(quoted)   # 保留引号内的完整短语
+        elif unquoted:
+            terms.append(unquoted) # 保留独立关键词
     return terms
 
 
@@ -316,8 +319,25 @@ def retrieve_pipeline(
 ) -> list[RawResult]:
     """按 search_type 分派并执行对应管道。
 
+    两种 ``search_type`` 对 ``search_query`` 的要求不同：
+
+    - ``"semantic"``（语义检索）：
+      传入**完整的自然语言问句**或上下文丰富的描述句。
+      底层依赖 Chroma 向量余弦相似度排序，完整句子能产生更准确的
+      语义向量，从而提升召回质量。例如：
+        ✓ ``"StateGraph 中的 add_messages 是如何累加的？"``
+        ✗ ``"add_messages 累加"``（过于简短，向量区分度低）
+
+    - ``"keyword"``（关键词检索）：
+      传入**空白符分隔的关键词列表**（由主图 agent 生成）。
+      底层按空白符切分后去 ``index.md`` 做关键词匹配 + 定向 Grep。
+      不需要完整句子，但多个关键词之间必须用空格隔开。
+      例如：
+        ✓ ``"StateGraph add_messages 消息累加"``
+        ✓ ``"StateGraph 条件边 send"``
+
     Args:
-        search_query: 检索词。
+        search_query: 检索词（形式要求见上方说明）。
         search_type: ``"semantic"`` 或 ``"keyword"``。
 
     Returns:
