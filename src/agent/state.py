@@ -21,8 +21,9 @@ class MainState(TypedDict, total=False):
     Attributes:
         messages: 对话消息历史（``add_messages`` 累积）。
         citations: 最后检索的结构化引用列表，供后续节点直接读取（如前端渲染）。
+        user_id: 当前会话的用户标识，用于 Store 键控（Phase 4）。
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
     citations: list[Citation]
-
+    user_id: str

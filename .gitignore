@@ -168,3 +168,10 @@ cython_debug/
 
 # 个人参考素材，非项目产物
 ref/
+
+# SQLite 数据库文件（本地运行时自动生成，不版本控制）
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+prototypes/*.sqlite

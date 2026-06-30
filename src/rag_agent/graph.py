@@ -4,10 +4,12 @@
     retrieve_node（按 search_type 分派管道）→ aggregate_node（gap 判定 + 排序）→ END
 
 编译产物 ``graph`` 注册到 ``langgraph.json``，供 Studio / SDK 调试。
-不在主图流程中（Phase 3 再通过 wrapper 节点接入）。
+``build_rag_graph(checkpointer=...)`` 供主图以生产模式（带 checkpointer）编译。
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -16,48 +18,34 @@ from rag_agent.tools.retrieval import aggregate_results, retrieve_pipeline
 
 
 def retrieve_node(state: RAGState) -> dict:
-    """检索节点：按 search_type 分派管道，产出 raw_results。
-
-    Args:
-        state: 含 search_query / search_type 的图状态。
-
-    Returns:
-        更新 raw_results。
-    """
+    """检索节点：按 search_type 分派管道，产出 raw_results。"""
     query = state.get("search_query", "")
     stype = state.get("search_type", "semantic")
     return {"raw_results": retrieve_pipeline(query, stype)}
 
 
 def aggregate_node(state: RAGState) -> dict:
-    """汇总节点：判 gap + 排序，产出 citations_output / gap_topic。
-
-    Args:
-        state: 含 raw_results 的图状态。
-
-    Returns:
-        更新 citations_output 与 gap_topic。
-    """
+    """汇总节点：判 gap + 排序，产出 citations_output / gap_topic。"""
     results = state.get("raw_results", [])
     query = state.get("search_query", "")
     citations, gap = aggregate_results(results, query)
     return {"citations_output": citations, "gap_topic": gap}
 
 
-def build_rag_graph() -> StateGraph:
-    """构建并编译 RAG 子图。
+def build_rag_workflow() -> Any:
+    """构建未编译的 RAG 子图。
 
-    Returns:
-        编译后的 LangGraph StateGraph 编译产物（可 invoke / astream）。
+    返回未编译的 ``StateGraph``，由 ``_default_registry`` 在注册阶段编译并绑定 checkpointer。
     """
-    g = StateGraph(RAGState)
-    g.add_node("retrieve", retrieve_node)
-    g.add_node("aggregate", aggregate_node)
-    g.add_edge(START, "retrieve")
-    g.add_edge("retrieve", "aggregate")
-    g.add_edge("aggregate", END)
-    return g.compile(name="RAGAgent")
+    workflow = StateGraph(RAGState)
+    workflow.add_node("retrieve", retrieve_node)
+    workflow.add_node("aggregate", aggregate_node)
+    workflow.add_edge(START, "retrieve")
+    workflow.add_edge("retrieve", "aggregate")
+    workflow.add_edge("aggregate", END)
+    return workflow
 
 
-graph = build_rag_graph()
-"""供 langgraph.json 发现的可执行图实例。"""
+# 供 langgraph.json / SDK 直接发现的模块级实例（无 checkpointer，纯调试用）
+graph = build_rag_workflow().compile(name="rag_agent")
+"""供 ``langgraph.json`` 及 ``__init__.py`` 导出的模块级图实例。"""

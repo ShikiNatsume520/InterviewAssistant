@@ -1,37 +1,52 @@
-"""主图：动态主图总线（``as_tool`` 路由版）。
+"""主图：动态主图总线 + Checkpointer + 长期记忆（Phase 4）。
 
 核心机制
 --------
-1. ``chat_node``: ``llm.bind_tools(all_tools).invoke(messages)`` — LLM 自主决策。
+1. ``chat_node``: ``bind_tools(ALL_TOOLS).invoke(messages)`` — LLM 自主决策；
+   每次调用时从 Store 读取用户长期记忆，拼接到 system prompt 尾部。
 2. ``route_after_chat``: 拦截 ``tool_call`` 分发
-   - 无 ``tool_call`` → ``END``
-   - 普通工具 → ``ToolNode``
+   - 无 ``tool_call`` → ``"save_memory"``（记忆提取节点）
    - 子智能体工具 → 对应 ``wrapper`` 节点
-3. ``wrapper`` 节点：解析 ``tool_call.args`` → invoke 子图 →
-   ``ToolMessage`` + 额外字段。
+   - 其他 → ``"tools_node"``
+3. 子智能体节点直接模块级导入编译后的子图，Studio 可静态追踪。
+4. 主图 + 子图共用持久化层，实现崩溃恢复与状态回放。
+
+无动态注册表。新增子智能体时只需：
+  a. 定义 @tool + 包装节点函数
+  b. 将 tool 加入 ``ALL_TOOLS``
+  c. 在 ``route_after_chat`` 和 ``path_map`` 中添加路由
+  d. 在 ``build_main_graph`` 中 ``add_node`` + ``add_edge``
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.store.base import BaseStore
 
-from agent.registry import AgentRegistry, SubAgentMetaData
+from agent.memory import load_memory_context, save_memory_node, set_store
+from agent.persistence import get_store
 from agent.state import MainState
 from agent.tools.rag_agent import rag_agent, rag_agent_node
 from src.client import get_chat_model
 
+# --------------------------------------------------------------------------- #
+# 工具列表（后续新增子图时扩展）
+# --------------------------------------------------------------------------- #
+
+BASIC_TOOLS: list[Any] = []
+"""普通工具列表（直接由 ToolNode 执行，无需包装节点拦截）。"""
+
+ALL_TOOLS: list[Any] = BASIC_TOOLS + [rag_agent]
+"""LLM bind_tools 的完整工具列表（含子智能体工具）。"""
+
 
 # --------------------------------------------------------------------------- #
-# 节点函数
+# 短期记忆：system prompt
 # --------------------------------------------------------------------------- #
-
-chat_model = None
 
 
 def _build_system_prompt() -> str:
@@ -45,73 +60,74 @@ def _build_system_prompt() -> str:
     )
 
 
-def chat_node(state: MainState, registry: AgentRegistry) -> dict[str, Any]:
-    """LLM 决策节点：注入 system prompt + ``bind_tools`` 让 LLM 自主决策。
+# --------------------------------------------------------------------------- #
+# 核心节点
+# --------------------------------------------------------------------------- #
 
-    Args:
-        state: 当前图状态。
-        registry: 注册中心（提供 ``get_all_tools``）。
 
-    Returns:
-        更新后的消息（AIMessage，可能含 ``tool_calls``）及当前 system_prompt。
+# chat_node 使用的模型（bind_tools 后），由 _init_chat 初始化
+_chat_model: Any = None
+
+
+def _init_chat(store: BaseStore) -> None:
+    """初始化 ``chat_node`` 依赖的全局状态。
+
+    在 ``build_main_graph`` 中调用，Store 实例在此注入。
     """
-    global chat_model
-    all_tools = registry.get_all_tools()
-    if chat_model is None:
-        chat_model = get_chat_model("deepseek-v4-flash", all_tools)
+    global _chat_model
+    _chat_model = get_chat_model("deepseek-v4-flash", tools=ALL_TOOLS)
+    set_store(store)
 
-    # 动态组装系统提示词，下面的方式能够在调用api时，自动把system prompt 塞入到messages的开头。这样做的好处是避免每个checkpointer都存储这个固定不变的system prompt
+
+def chat_node(state: MainState) -> dict[str, Any]:
+    """LLM 决策节点 + 记忆注入。
+
+    每次调用时从 ``agent.memory`` 读取当前用户记忆，拼接到 system prompt 尾部。
+    """
+    if _chat_model is None:
+        raise RuntimeError("chat_node 未初始化——请确保 _init_chat() 已被调用")
+
+    user_id = state.get("user_id", "default")
+    mc = load_memory_context(user_id)
     system_prompt = _build_system_prompt()
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("placeholder", "{messages}"),
-    ])
-    chain = prompt | chat_model
+    if mc:
+        system_prompt += f"\n\n## Memory\n{mc}"
 
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("placeholder", "{messages}"),
+        ]
+    )
+    chain = prompt | _chat_model
     response = chain.invoke({"messages": state.get("messages", [])})
     return {"messages": [response]}
 
 
-def route_after_chat(state: MainState, registry: AgentRegistry) -> str:
+def route_after_chat(state: MainState) -> str:
     """``chat_node`` 的条件路由。
 
     检查最后一条消息的 ``tool_calls``:
 
-    - 无 ``tool_call`` → ``END``
-    - 工具名在注册表中（子智能体） → 路由到同名 ``wrapper`` 节点
-    - 否则（普通工具） → ``"tools_node"``
+    - 无 ``tool_call`` → ``"save_memory"``
+    - 工具名为子智能体 → 对应 ``wrapper`` 节点（后续新增时扩展）
+    - 否则 → ``"tools_node"``
     """
     messages = state.get("messages", [])
     if not messages:
-        return END
+        return "save_memory"
 
     tool_calls = getattr(messages[-1], "tool_calls", [])
     if not tool_calls:
-        return END
+        return "save_memory"
 
     tool_name: str = str(tool_calls[0].get("name", ""))
-    if registry.is_sub_agent(tool_name):
-        return tool_name  # 节点名 = 工具名 = 注册名
+
+    # 子智能体路由（后续新增子图时扩展）
+    if tool_name == "rag_agent":
+        return "rag_agent"
 
     return "tools_node"
-
-
-# --------------------------------------------------------------------------- #
-# 默认注册表
-# --------------------------------------------------------------------------- #
-
-
-def _default_registry() -> AgentRegistry:
-    """构建默认注册表（当前仅 rag_agent 一个子智能体）。"""
-    registry = AgentRegistry()
-    registry.register(
-        SubAgentMetaData(
-            name="rag_agent",
-            tool=rag_agent,
-            wrapper_node_fn=rag_agent_node,
-        )
-    )
-    return registry
 
 
 # --------------------------------------------------------------------------- #
@@ -120,52 +136,60 @@ def _default_registry() -> AgentRegistry:
 
 
 def build_main_graph(
-    registry: AgentRegistry | None = None,
+    checkpointer: Any = None,
+    store: BaseStore | None = None,
 ) -> Any:
-    """构建并编译主图（返回 ``CompiledStateGraph``，但类型桩限制用 ``Any`` 避免误报）。
+    """构建并编译主图。
 
     Args:
-        registry: 预配置的子智能体注册表。为 ``None`` 时使用默认注册。
+        checkpointer: Checkpointer 实例（``SqliteSaver``），``False`` 表示使用平台默认。
+        store: Store 实例（``SqliteStore``），为 ``None`` 时创建默认。
 
     Returns:
         编译后的 ``CompiledStateGraph``。
     """
-    if registry is None:
-        registry = _default_registry()
+    if store is None:
+        store = get_store()
+
+    # 初始化全局状态（chat_model + store）
+    _init_chat(store)
 
     workflow = StateGraph(MainState)
 
-    # ── 基础节点 ──────────────────────────────────────────────────────
-    workflow.add_node("chat_node", lambda state: chat_node(state, registry))
-    workflow.add_node("tools_node", ToolNode(registry.basic_tools))
+    # ── 节点：静态注册，全部加载 ──
+    workflow.add_node("chat_node", chat_node)
+    workflow.add_node("rag_agent", rag_agent_node)
+    workflow.add_node("tools_node", ToolNode(BASIC_TOOLS))
+    workflow.add_node("save_memory", save_memory_node)
 
-    # ── 动态注册子图包装节点 ──────────────────────────────────────────
-    for name, meta in registry.registered.items():
-        workflow.add_node(name, meta.wrapper_node_fn)
-        workflow.add_edge(name, "chat_node")
-
-    # ── 连线 ──────────────────────────────────────────────────────────
+    # ── 连线 ──
     workflow.set_entry_point("chat_node")
 
-    # 动态构建 path_map（子图名 / tools_node / END）
-    path_map: dict[str, str] = {"tools_node": "tools_node", END: END}
-    for name in registry.get_sub_agent_names():
-        path_map[name] = name
+    path_map: dict[Any, str] = {
+        "save_memory": "save_memory",
+        "tools_node": "tools_node",
+        "rag_agent": "rag_agent",
+    }
 
     workflow.add_conditional_edges(
         "chat_node",
-        lambda state: route_after_chat(state, registry),
+        route_after_chat,
         path_map,
     )
 
+    workflow.add_edge("rag_agent", "chat_node")
     workflow.add_edge("tools_node", "chat_node")
+    workflow.add_edge("save_memory", END)
 
-    return workflow.compile(name="MainAgent")
+    return workflow.compile(
+        name="MainAgent",
+        checkpointer=checkpointer,
+    )
 
 
 # =========================================================================== #
 # 模块导出 — 供 ``langgraph.json`` 发现
 # =========================================================================== #
 
-graph = build_main_graph()
-"""供 ``langgraph.json`` 及 ``__init__.py`` 导出的可执行图实例。"""
+graph = build_main_graph(checkpointer=False)
+"""供 ``langgraph.json`` 及 ``__init__.py`` 导出的可执行图实例（Studio 调试用，无自定义 checkpointer）。"""

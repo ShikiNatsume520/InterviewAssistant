@@ -7,5 +7,9 @@
     "rag_agent": "./src/rag_agent/graph.py:graph"
   },
   "env": ".env",
-  "image_distro": "wolfi"
+  "image_distro": "wolfi",
+  "checkpointer": {
+    "path": "./src/agent/checkpointer.py:generate_checkpointer"
+    
+  }
 }
