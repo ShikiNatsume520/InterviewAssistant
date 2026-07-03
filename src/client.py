@@ -1,13 +1,14 @@
 # 封装langchain中的client接口，快速调用LLM模型
-from langchain.chat_models import init_chat_model, BaseChatModel
 import os
+
 from dotenv import load_dotenv
+from langchain.chat_models import BaseChatModel, init_chat_model
+
 load_dotenv()  # 加载环境变量
 
 
 def get_chat_model(model_name: str, tools: list | None = None)->BaseChatModel:
     """获取聊天模型实例"""
-
     if "deepseek" in model_name.lower():
         api_key = os.getenv("DEEPSEEK_API_KEY")
         base_url = os.getenv("DEEPSEEK_API_URL")

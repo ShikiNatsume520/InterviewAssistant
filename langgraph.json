@@ -5,7 +5,8 @@
     "main_agent": "./src/agent/graph.py:graph",
     "index_agent": "./src/index_agent/graph.py:graph",
     "rag_agent": "./src/rag_agent/graph.py:graph",
-    "resume_agent": "./src/resume_agent/graph.py:graph"
+    "resume_agent": "./src/resume_agent/graph.py:graph",
+    "research_agent": "./src/research_agent/graph.py:graph"
   },
   "env": ".env",
   "image_distro": "wolfi",

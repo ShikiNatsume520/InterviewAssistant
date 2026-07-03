@@ -11,16 +11,13 @@ LLM 自行调用；后端取 tool_calls 校验，未调用工具时兜底从文�
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from dotenv import load_dotenv
 from langchain_core.runnables import Runnable
-from langchain_openai import ChatOpenAI
-
-from src.client import get_chat_model
 
 from index_agent.state import Chunk, IndexRow, IndexUpdate
+from src.client import get_chat_model
 
 load_dotenv()
 

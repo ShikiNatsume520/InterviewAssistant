@@ -79,8 +79,7 @@ def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def _extract_terms(query: str) -> list[str]:
-    """
-    解析关键词查询，支持引号包裹的短语。
+    """解析关键词查询，支持引号包裹的短语。
     示例: ' "StateGraph 状态管理" 检查点 "tool calling" ' 
           -> ['StateGraph 状态管理', '检查点', 'tool calling']
     """
@@ -163,7 +162,7 @@ def _grep_file(path: Path, terms: list[str]) -> list[RawResult]:
 # keyword 管道
 # --------------------------------------------------------------------------- #
 def keyword_retrieve(search_query: str) -> list[RawResult]:
-    """keyword 管道：index.md 关键词匹配 → 候选文件定向 grep 或无候选全目录 grep。
+    """Keyword 管道：index.md 关键词匹配 → 候选文件定向 grep 或无候选全目录 grep。
 
     Args:
         search_query: 主图 Router 提供的检索词。
@@ -255,7 +254,7 @@ def _compute_confidence(
 
 
 def semantic_retrieve(search_query: str) -> list[RawResult]:
-    """semantic 管道：向量检索 → 标题节扩展 → 分差比置信度 → 兜底全目录 grep。
+    """Semantic 管道：向量检索 → 标题节扩展 → 分差比置信度 → 兜底全目录 grep。
 
     返回值可为空 → aggregate 判 gap。
 
@@ -266,6 +265,7 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
         有效检索结果（已通过置信度验证），或空列表（gap 场景）。
     """
     import chromadb
+
     from index_agent.tools.vectorstore import get_embed_fn
 
     client = chromadb.PersistentClient(path=str(CHROMA_PATH))

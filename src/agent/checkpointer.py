@@ -1,6 +1,8 @@
 # src/agent/checkpointer.py
 import contextlib
+
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
 
 @contextlib.asynccontextmanager
 async def generate_checkpointer():

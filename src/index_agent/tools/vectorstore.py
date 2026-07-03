@@ -39,6 +39,7 @@ class SiliconFlowEmbeddingFunction:
 
     def __init__(self) -> None:
         import os
+
         from openai import OpenAI
 
         self._model = os.environ["SILICONFLOW_EMBEDDING_MODEL"]

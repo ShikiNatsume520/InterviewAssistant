@@ -32,6 +32,7 @@ from agent.memory import load_memory_context, save_memory_node, set_store
 from agent.persistence import get_store
 from agent.state import MainState
 from agent.tools.rag_agent import rag_agent, rag_agent_node
+from agent.tools.research_agent import research_agent, research_agent_node
 from agent.tools.resume_agent import resume_agent, resume_agent_node
 from src.client import get_chat_model
 
@@ -42,7 +43,7 @@ from src.client import get_chat_model
 BASIC_TOOLS: list[Any] = []
 """普通工具列表（直接由 ToolNode 执行，无需包装节点拦截）。"""
 
-ALL_TOOLS: list[Any] = BASIC_TOOLS + [rag_agent, resume_agent]
+ALL_TOOLS: list[Any] = BASIC_TOOLS + [rag_agent, resume_agent, research_agent]
 """LLM bind_tools 的完整工具列表（含子智能体工具）。"""
 
 
@@ -61,7 +62,11 @@ def _build_system_prompt() -> str:
         "1. 知识问答必须基于 rag_agent 检索结果回答，严禁编造信息。回答时引用来源。\n"
         "2. 当用户明确要求优化/修改简历时，调用 resume_agent 工具进入简历优化子流程，"
         "由子流程完成多轮 CRUD 优化；普通闲聊直接回复即可。\n"
-        "3. 工具使用时机和参数由工具自身的描述和 schema 定义，遵循即可。"
+        "3. 当 rag_agent 返回知识缺口（未在知识库找到相关内容）时，**先用自然语言"
+        "询问用户**是否需要联网深研补足资料（例如「知识库里没有关于 X 的内容，要不要"
+        "我联网深研帮你补一下？」）；得到用户**明确同意**后，再调用 research_agent 工具"
+        "进入深研子流程。不要在用户未同意时擅自深研。\n"
+        "4. 工具使用时机和参数由工具自身的描述和 schema 定义，遵循即可。"
     )
 
 
@@ -169,6 +174,9 @@ def route_after_chat(state: MainState) -> str:
     if tool_name == "resume_agent":
         dlog("main", "route_after_chat", f"→ resume_agent (tool={tool_name})")
         return "resume_agent"
+    if tool_name == "research_agent":
+        dlog("main", "route_after_chat", f"→ research_agent (tool={tool_name})")
+        return "research_agent"
 
     dlog("main", "route_after_chat", f"→ tools_node (tool={tool_name})")
     return "tools_node"
@@ -211,6 +219,7 @@ def build_main_graph(
     workflow.add_node("chat_node", chat_node)
     workflow.add_node("rag_agent", rag_agent_node)
     workflow.add_node("resume_agent", resume_agent_node)
+    workflow.add_node("research_agent", research_agent_node)
     workflow.add_node("tools_node", ToolNode(BASIC_TOOLS))
     workflow.add_node("save_memory", save_memory_node)
 
@@ -222,6 +231,7 @@ def build_main_graph(
         "tools_node": "tools_node",
         "rag_agent": "rag_agent",
         "resume_agent": "resume_agent",
+        "research_agent": "research_agent",
     }
 
     workflow.add_conditional_edges(
@@ -232,6 +242,7 @@ def build_main_graph(
 
     workflow.add_edge("rag_agent", "chat_node")
     workflow.add_edge("resume_agent", "chat_node")
+    workflow.add_edge("research_agent", "chat_node")
     workflow.add_edge("tools_node", "chat_node")
     workflow.add_edge("save_memory", END)
 
