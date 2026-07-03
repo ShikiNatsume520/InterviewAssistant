@@ -6,3 +6,4 @@
 |--------|------|------|
 | LangGraph, StateGraph, 状态管理, TypedDict, Pydantic, reducer, Annotated, add_messages, 运行时上下文 | LangGraph 状态管理：TypedDict/Pydantic 定义状态作为节点间数据载体，Annotated+reducer 实现字段累加，Runtime 提供运行时上下文 | [langgraph_state.md](data/markdown/langgraph_state.md) |
 | LangGraph, subgraph, 子图, 多智能体, 状态隔离, wrapper node, checkpoint, invoke | LangGraph 子图与多智能体：子图独立状态 schema，通过 invoke 调用，继承 checkpoint 链便于回溯与故障重放，主图与子图通过槽位隔离状态 | [langgraph_subgraph.md](data/markdown/langgraph_subgraph.md) |
+| 简历模板, 简历优化, 技术岗, 算法岗, STAR法则, 项目经历, 技能列表 | 简历模板参考：技术岗与算法岗简历编写指导，含STAR法则项目经历写法及技能列表写法 | [resume_template.md](data/markdown/resume_template.md) |

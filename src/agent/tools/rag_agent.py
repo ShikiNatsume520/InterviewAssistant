@@ -15,6 +15,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import Field
 
+from agent.debug import dlog
 from agent.state import MainState
 from rag_agent.graph import build_rag_workflow
 from rag_agent.state import Citation
@@ -64,6 +65,8 @@ async def rag_agent_node(state: MainState, config: RunnableConfig) -> dict[str, 
     # ── 惰性编译子图（复用主图 checkpointer），只一次 ──
     if getattr(rag_agent_node, "_rag_graph", None) is None:
         cp = config.get("configurable", {}).get("__pregel_checkpointer")
+        dlog("rag", "rag_agent_node", "首次惰性编译 RAG 子图",
+             checkpointer=type(cp).__name__ if cp else "None")
         rag_agent_node._rag_graph = build_rag_workflow().compile(  # type: ignore[attr-defined]
             name="RAGAgent",
             checkpointer=cp,
@@ -73,11 +76,13 @@ async def rag_agent_node(state: MainState, config: RunnableConfig) -> dict[str, 
     # ── 提取参数并调用 ──
     messages = state.get("messages", [])
     if not messages:
+        dlog("rag", "rag_agent_node", "无消息，返回空")
         return {"citations": []}
 
     last_msg = messages[-1]
     tool_calls = getattr(last_msg, "tool_calls", [])
     if not tool_calls:
+        dlog("rag", "rag_agent_node", "最后消息无 tool_call，返回空")
         return {"citations": []}
 
     tool_messages: list[ToolMessage] = []
@@ -85,18 +90,24 @@ async def rag_agent_node(state: MainState, config: RunnableConfig) -> dict[str, 
 
     for tc in tool_calls:
         args = tc.get("args", {})
+        query = args.get("query", args.get("search_query", ""))
+        stype = args.get("search_type", "semantic")
+        dlog("rag", "rag_agent_node", "调用 RAG 子图",
+             query=query, search_type=stype, tool_call_id=tc.get("id"))
 
         # 异步调用子图，兼容异步 checkpointer（如 _CustomCheckpointerAdapter）
         result = await rag_graph.ainvoke(
             {
-                "search_query": args.get("query", args.get("search_query", "")),
-                "search_type": args.get("search_type", "semantic"),
+                "search_query": query,
+                "search_type": stype,
             },
             config,
         )
 
         citations: list[Citation] = result.get("citations_output", [])
         gap_topic: str | None = result.get("gap_topic")
+        dlog("rag", "rag_agent_node", "RAG 子图返回",
+             citations_n=len(citations), gap_topic=gap_topic)
 
         if gap_topic:
             content = f"未在知识库中找到「{gap_topic}」的相关内容。"

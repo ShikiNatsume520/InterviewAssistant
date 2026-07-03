@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>InterviewAssistant 测试台</title>
+<style>
+  :root {
+    --bg: #1a1a1f; --panel: #23232b; --panel2: #2c2c36;
+    --border: #3a3a46; --text: #e4e4e7; --muted: #8b8b96;
+    --accent: #6b8cff; --accent2: #4f6bd6;
+    --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    --user: #3a5a8a; --ai: #3a3a46;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; font-weight: 600; margin-right: 8px; }
+  .field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .field input {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 8px; border-radius: 4px; font-size: 12px; width: 180px;
+  }
+  .field input:focus { outline: none; border-color: var(--accent); }
+  .new-thread-btn {
+    background: var(--accent); color: #fff; border: none; padding: 5px 10px;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .new-thread-btn:hover { background: var(--accent2); }
+  .status-pill {
+    font-size: 11px; padding: 3px 8px; border-radius: 10px;
+    background: var(--panel2); color: var(--muted); margin-left: auto;
+  }
+  .status-pill.streaming { background: #3a3a1f; color: var(--warn); }
+  .status-pill.idle { background: #1f3a2a; color: var(--ok); }
+  .status-pill.interrupt { background: #3a1f2a; color: var(--err); }
+
+  main {
+    flex: 1; display: flex; overflow: hidden;
+  }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .msg {
+    max-width: 80%; padding: 9px 13px; border-radius: 10px; font-size: 14px;
+    line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user { background: var(--user); align-self: flex-end; border-bottom-right-radius: 2px; }
+  .msg.ai { background: var(--ai); align-self: flex-start; border-bottom-left-radius: 2px; }
+  .msg.system { background: #3a2a1f; color: var(--warn); align-self: center; font-size: 12px; max-width: 90%; }
+  .msg.tool { background: #2a3a1f; color: var(--ok); align-self: flex-start; font-family: monospace; font-size: 12px; }
+  .msg.streaming::after {
+    content: "▋"; animation: blink 1s infinite; color: var(--accent);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .citations {
+    align-self: flex-start; max-width: 80%; font-size: 11px; color: var(--muted);
+    background: var(--panel2); border-left: 2px solid var(--accent); padding: 6px 10px;
+    border-radius: 4px; margin-top: -4px;
+  }
+  .citations .cite { display: block; margin: 2px 0; }
+
+  .interrupt-box {
+    align-self: center; max-width: 88%; background: var(--panel); border: 1px solid var(--warn);
+    border-radius: 8px; padding: 12px 16px; margin: 8px 0;
+  }
+  .interrupt-box .label {
+    font-size: 11px; color: var(--warn); font-weight: 600; margin-bottom: 8px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .interrupt-box .plan-list { list-style: none; margin: 6px 0 10px; }
+  .interrupt-box .plan-list li { padding: 3px 0; font-size: 13px; }
+  .interrupt-box .plan-list li::before { content: "▸ "; color: var(--accent); }
+  .interrupt-box .draft-preview {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px; font-family: monospace; font-size: 11px; max-height: 160px;
+    overflow-y: auto; margin: 6px 0; white-space: pre-wrap;
+  }
+  .interrupt-box .diff-label { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .interrupt-box .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .interrupt-box .actions textarea {
+    flex: 1 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 4px; padding: 6px 8px; font-size: 12px; resize: vertical; min-height: 40px;
+  }
+  .ib-btn {
+    padding: 6px 14px; border-radius: 4px; border: none; cursor: pointer;
+    font-size: 12px; font-weight: 500;
+  }
+  .ib-btn.approve { background: var(--ok); color: #0a0a0a; }
+  .ib-btn.reject { background: var(--err); color: #fff; }
+  .ib-btn.suggest { background: var(--warn); color: #0a0a0a; }
+
+  #composer {
+    padding: 12px 16px; background: var(--panel); border-top: 1px solid var(--border);
+    display: flex; gap: 8px; align-items: flex-end;
+  }
+  #composer textarea {
+    flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 9px 12px; font-size: 14px; font-family: inherit;
+    resize: none; min-height: 42px; max-height: 140px; line-height: 1.4;
+  }
+  #composer textarea:focus { outline: none; border-color: var(--accent); }
+  #send-btn {
+    background: var(--accent); color: #fff; border: none; padding: 0 18px;
+    border-radius: 6px; cursor: pointer; font-size: 14px; height: 42px; font-weight: 500;
+  }
+  #send-btn:hover:not(:disabled) { background: var(--accent2); }
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .examples {
+    padding: 6px 16px; background: var(--panel); border-top: 1px solid var(--border);
+    display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px;
+  }
+  .examples .ex {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+    padding: 3px 8px; border-radius: 10px; cursor: pointer;
+  }
+  .examples .ex:hover { color: var(--text); border-color: var(--accent); }
+
+  #side {
+    width: 240px; background: var(--panel); border-left: 1px solid var(--border);
+    padding: 12px; overflow-y: auto; font-size: 12px;
+  }
+  #side h3 { font-size: 12px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; }
+  #side .info { background: var(--panel2); padding: 8px; border-radius: 4px; margin-bottom: 8px; }
+  #side .info b { color: var(--accent); }
+  #side .resume-state {
+    background: var(--bg); padding: 8px; border-radius: 4px; font-family: monospace;
+    font-size: 10px; white-space: pre-wrap; max-height: 280px; overflow-y: auto;
+    border: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>InterviewAssistant</h1>
+  <div class="field">user_id <input id="user-id" value="test_user" /></div>
+  <div class="field">thread_id <input id="thread-id" /></div>
+  <button class="new-thread-btn" id="new-thread">新建会话</button>
+  <div class="status-pill idle" id="status">就绪</div>
+</header>
+
+<main>
+  <div id="chat"></div>
+  <aside id="side">
+    <h3>会话信息</h3>
+    <div class="info">状态: <b id="info-state">就绪</b></div>
+    <div class="info">pending interrupt: <b id="info-pending">无</b></div>
+    <h3>简历草稿</h3>
+    <div class="resume-state" id="resume-draft">(尚未进入简历优化)</div>
+    <h3>检索引用</h3>
+    <div class="resume-state" id="citations-side">(无)</div>
+  </aside>
+</main>
+
+<div class="examples">
+  <span class="ex" data-text="你好，简单介绍下你自己能做什么">寒暄</span>
+  <span class="ex" data-text="StateGraph 中的状态管理机制是怎样的？">知识问答(semantic)</span>
+  <span class="ex" data-text="查找 StateGraph 这个类名在文档中的位置">关键词检索(keyword)</span>
+  <span class="ex" data-text="帮我优化简历，这是我的简历：\n# 张三\n## 教育背景\n某大学 计算机科学 2020-2024\n## 技能\nPython Java C++\n\n我希望突出项目经历，精简技能">简历优化</span>
+</div>
+
+<div id="composer">
+  <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行…" rows="1"></textarea>
+  <button id="send-btn">发送</button>
+</div>
+
+<details id="debug-panel" style="background:var(--panel);border-top:1px solid var(--border);max-height:180px;display:flex;flex-direction:column;">
+  <summary style="padding:6px 12px;cursor:pointer;font-size:11px;color:var(--muted);user-select:none;">
+    调试日志 <button id="clear-debug" style="float:right;background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:1px 6px;border-radius:3px;cursor:pointer;font-size:10px;">清空</button>
+  </summary>
+  <pre id="debug-log" style="margin:0;padding:6px 12px;font-size:11px;font-family:monospace;color:var(--muted);overflow-y:auto;flex:1;white-space:pre-wrap;word-break:break-all;"></pre>
+</details>
+
+<script>
+// ────────────────────────────────────────────────────────────
+// 调试日志（页面可见）
+// ────────────────────────────────────────────────────────────
+const DEBUG = true;
+function dbg(tag, ...args) {
+  if (!DEBUG) return;
+  const ts = new Date().toLocaleTimeString();
+  const line = `[${ts}] ${tag} ` + args.map(a =>
+    typeof a === "string" ? a : JSON.stringify(a)
+  ).join(" ");
+  console.log(line);
+  const el = $("debug-log");
+  if (el) {
+    el.textContent += line + "\n";
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+let streaming = false;       // 是否正在流式输出
+let currentAIMsg = null;     // 当前正在接收 token 的 AI 消息 DOM
+let pendingInterrupt = null; // 当前挂起的 interrupt payload（null 表示无）
+let curCitations = [];       // 最近一轮的引用列表
+
+const $ = (id) => document.getElementById(id);
+const chat = $("chat");
+const input = $("input");
+const sendBtn = $("send-btn");
+const statusEl = $("status");
+const threadInput = $("thread-id");
+
+// 初始化 thread_id
+function genThreadId() { return "web-" + Math.random().toString(36).slice(2, 10); }
+threadInput.value = genThreadId();
+$("new-thread").onclick = () => {
+  threadInput.value = genThreadId();
+  chat.innerHTML = "";
+  pendingInterrupt = null;
+  curCitations = [];
+  updateStatus();
+  appendSystem("已新建会话：" + threadInput.value);
+};
+
+// ────────────────────────────────────────────────────────────
+// UI 辅助
+// ────────────────────────────────────────────────────────────
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = "status-pill " + cls;
+  $("info-state").textContent = text;
+}
+function updateStatus() {
+  if (streaming) { setStatus("流式中…", "streaming"); return; }
+  if (pendingInterrupt) { setStatus("等待确认", "interrupt"); return; }
+  setStatus("就绪", "idle");
+}
+function appendSystem(text) {
+  const d = document.createElement("div");
+  d.className = "msg system"; d.textContent = text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+function appendUser(text) {
+  const d = document.createElement("div");
+  d.className = "msg user"; d.textContent = text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+function startAIMsg() {
+  const d = document.createElement("div");
+  d.className = "msg ai streaming";
+  chat.appendChild(d);
+  currentAIMsg = d;
+  return d;
+}
+function appendToolMsg(text) {
+  const d = document.createElement("div");
+  d.className = "msg tool"; d.textContent = "[tool] " + text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+function renderCitations(cits) {
+  if (!cits || !cits.length) return;
+  curCitations = cits;
+  const box = document.createElement("div");
+  box.className = "citations";
+  box.innerHTML = "<b>引用来源:</b>";
+  cits.forEach((c, i) => {
+    const s = document.createElement("span");
+    s.className = "cite";
+    s.textContent = `[${i+1}] ${c.file_path} (L${c.start_line}~${c.end_line})`;
+    box.appendChild(s);
+  });
+  chat.appendChild(box);
+  // 侧栏
+  $("citations-side").textContent = cits.map((c,i) =>
+    `[${i+1}] ${c.file_path} L${c.start_line}-${c.end_line}`).join("\n");
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// ────────────────────────────────────────────────────────────
+// interrupt 渲染（plan_confirm / step_confirm）
+// ────────────────────────────────────────────────────────────
+function renderInterrupt(payload) {
+  pendingInterrupt = payload;
+  $("info-pending").textContent = payload.phase || "未知";
+  updateStatus();
+
+  const box = document.createElement("div");
+  box.className = "interrupt-box";
+
+  if (payload.phase === "plan_confirm") {
+    box.innerHTML = `
+      <div class="label">⚙ 计划确认</div>
+      <div>请确认以下优化计划：</div>
+      <ul class="plan-list"></ul>
+    `;
+    (payload.plan || []).forEach((s, i) => {
+      const li = document.createElement("li");
+      li.textContent = `${i+1}. ${s}`;
+      box.querySelector(".plan-list").appendChild(li);
+    });
+    const ta = document.createElement("textarea");
+    ta.placeholder = "对计划的建议（可选，填写后点'建议'会带建议重新规划）";
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const ok = mkBtn("批准", "approve", () => resumeWith("approve"));
+    const sug = mkBtn("提交建议", "suggest", () => {
+      if (!ta.value.trim()) { appendSystem("请填写建议内容"); return; }
+      resumeWith({ decision: "suggest", suggestion: ta.value.trim() });
+    });
+    actions.append(ta, ok, sug);
+    box.appendChild(actions);
+
+  } else if (payload.phase === "step_confirm") {
+    box.innerHTML = `
+      <div class="label">✎ 单步修改确认</div>
+      <div class="diff-label">修改前：</div>
+      <div class="draft-preview"></div>
+      <div class="diff-label">修改后：</div>
+      <div class="draft-preview"></div>
+    `;
+    const pres = box.querySelectorAll(".draft-preview");
+    pres[0].textContent = payload.before || "(空)";
+    pres[1].textContent = payload.after || "(空)";
+    $("resume-draft").textContent = payload.after || "(空)";
+
+    const ta = document.createElement("textarea");
+    ta.placeholder = "对该步骤的建议（可选）";
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const ok = mkBtn("批准", "approve", () => resumeWith("approve"));
+    const no = mkBtn("拒绝(回退)", "reject", () => resumeWith("reject"));
+    const sug = mkBtn("提交建议", "suggest", () => {
+      if (!ta.value.trim()) { appendSystem("请填写建议内容"); return; }
+      resumeWith({ decision: "suggest", suggestion: ta.value.trim() });
+    });
+    actions.append(ta, ok, no, sug);
+    box.appendChild(actions);
+
+  } else {
+    box.innerHTML = `<div class="label">⚠ 未知 interrupt</div>
+      <pre>${JSON.stringify(payload, null, 2)}</pre>`;
+  }
+  chat.appendChild(box);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function mkBtn(text, cls, onclick) {
+  const b = document.createElement("button");
+  b.className = "ib-btn " + cls;
+  b.textContent = text;
+  b.onclick = onclick;
+  return b;
+}
+
+// ────────────────────────────────────────────────────────────
+// 发送 / resume
+// ────────────────────────────────────────────────────────────
+async function sendMessage(opts = {}) {
+  const message = opts.message ?? input.value.trim();
+  if (!message && !opts.resume) return;
+  if (streaming) return;
+
+  const userId = $("user-id").value.trim() || "test_user";
+  const threadId = threadInput.value.trim();
+  if (!threadId) { appendSystem("请填写 thread_id"); return; }
+
+  // 显示用户消息（resume 场景不显示，因为不是用户文字输入）
+  if (!opts.resume && message) {
+    appendUser(message);
+  }
+  input.value = "";
+  input.style.height = "auto";
+
+  startAIMsg();
+  streaming = true;
+  updateStatus();
+  sendBtn.disabled = true;
+
+  // 每次请求本地清空 interrupt 暂存，避免跨请求残留
+  let localInterrupt = null;
+
+  const body = {
+    user_id: userId,
+    thread_id: threadId,
+    message: message || "(确认)",
+  };
+  if (opts.resume !== undefined) {
+    body.resume_value = opts.resume;
+  }
+
+  try {
+    const resp = await fetch("/v1/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      appendSystem(`HTTP ${resp.status}: ${txt.slice(0, 200)}`);
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let frameCount = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        dbg("sse", "stream done, 总帧数=", frameCount);
+        break;
+      }
+      const chunk = dec.decode(value, { stream: true });
+      dbg("sse", "raw chunk len=", chunk.length);
+      buf += chunk;
+
+      // SSE 按 \r\n\r\n 或 \n\n 分帧（sse-starlette 用 CRLF）
+      let idx;
+      const SEP = "\r\n\r\n";
+      while ((idx = buf.indexOf(SEP)) !== -1) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + SEP.length);
+        frameCount++;
+        const evt = parseSSE(frame);
+        dbg("sse", `帧#${frameCount} event=${evt.event} dataLen=${evt.data.length}`);
+        if (evt.data) dbg("sse", `  data预览=${evt.data.slice(0, 120)}`);
+
+        if (evt.event === "token") {
+          if (evt.data) {
+            currentAIMsg.textContent += evt.data;
+            chat.scrollTop = chat.scrollHeight;
+          }
+        } else if (evt.event === "interrupt") {
+          // 后端在流期间可能 yield 两次 interrupt（开头上下文 + 结尾状态），
+          // 取最后一次的 payload 渲染即可（结构相同）。
+          try {
+            localInterrupt = JSON.parse(evt.data);
+            dbg("interrupt", "已暂存 localInterrupt, phase=", localInterrupt?.interrupts?.[0]?.phase || localInterrupt?.phase);
+          } catch (e) {
+            dbg("interrupt", "payload 解析失败:", e.message);
+            appendSystem("interrupt payload 解析失败: " + e.message);
+          }
+        } else if (evt.event === "done") {
+          try {
+            const d = JSON.parse(evt.data);
+            dbg("done", "citations_n=", d.citations?.length || 0);
+            if (d.citations) renderCitations(d.citations);
+          } catch (e) { /* 忽略 */ }
+        }
+      }
+    }
+
+    // 流结束
+    dbg("flow", "流结束, localInterrupt=", localInterrupt ? "有" : "无");
+    currentAIMsg.classList.remove("streaming");
+    if (!currentAIMsg.textContent.trim()) {
+      currentAIMsg.remove();
+    }
+    currentAIMsg = null;
+
+    // 渲染 interrupt 或清理状态
+    if (localInterrupt) {
+      pendingInterrupt = localInterrupt;
+      // payload 形如 {"interrupts": [...]} 或直接是 interrupt 对象
+      let first = localInterrupt;
+      if (localInterrupt.interrupts) {
+        const arr = localInterrupt.interrupts;
+        first = Array.isArray(arr) && arr.length ? arr[0] : arr;
+      }
+      dbg("flow", "准备渲染 interrupt, phase=", first?.phase);
+      renderInterrupt(first);
+    } else {
+      dbg("flow", "无 interrupt, 清理 pending 状态");
+      pendingInterrupt = null;
+      $("info-pending").textContent = "无";
+    }
+  } catch (e) {
+    appendSystem("请求失败: " + e.message);
+    if (currentAIMsg) { currentAIMsg.classList.remove("streaming"); currentAIMsg.remove(); currentAIMsg = null; }
+  } finally {
+    streaming = false;
+    sendBtn.disabled = false;
+    updateStatus();
+  }
+}
+
+function resumeWith(value) {
+  // 移除已渲染的 interrupt-box
+  pendingInterrupt = null;
+  document.querySelectorAll(".interrupt-box").forEach(b => b.remove());
+  $("info-pending").textContent = "无";
+  // 给个简短系统提示
+  const label = typeof value === "string" ? value : `建议: ${value.suggestion}`;
+  appendSystem(`用户操作: ${label}`);
+  sendMessage({ resume: value, message: label });
+}
+
+function parseSSE(frame) {
+  // sse-starlette 用 CRLF，统一按 /\r?\n/ 切行
+  const lines = frame.split(/\r?\n/);
+  let event = "message";
+  const dataParts = [];
+  for (const ln of lines) {
+    if (ln.startsWith("event:")) {
+      event = ln.slice(6).trim();
+    } else if (ln.startsWith("data:")) {
+      let d = ln.slice(5);
+      if (d.startsWith(" ")) d = d.slice(1);
+      dataParts.push(d);
+    }
+  }
+  return { event, data: dataParts.join("\n") };
+}
+
+// ────────────────────────────────────────────────────────────
+// 输入框
+// ────────────────────────────────────────────────────────────
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 140) + "px";
+});
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+sendBtn.onclick = () => sendMessage();
+
+// 示例点击
+document.querySelectorAll(".examples .ex").forEach(el => {
+  el.onclick = () => {
+    input.value = el.dataset.text;
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  };
+});
+
+// 启动提示
+appendSystem("已就绪。可点击下方示例快速体验，或直接输入。");
+appendSystem("提示：简历优化会触发多次确认（计划确认 → 每步修改确认），请在弹出的确认框中选择批准/拒绝/建议。");
+dbg("init", "前端调试日志已启用");
+
+// 清空调试日志
+$("clear-debug").onclick = () => { $("debug-log").textContent = ""; };
+</script>
+</body>
+</html>
