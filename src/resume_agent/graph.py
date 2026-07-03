@@ -43,7 +43,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 
-from agent.debug import dlog
+from agent.debug import dlog, slog
 from resume_agent.state import ResumeState
 from resume_agent.tools.crud import RESUME_CRUD_TOOLS
 from src.client import get_chat_model
@@ -97,6 +97,7 @@ def plan_node(state: ResumeState) -> dict[str, Any]:
     intent = state.get("intent", "")
     resume = state.get("original_resume", state.get("current_draft", ""))
     dlog("resume", "plan_node", "进入规划", intent=intent, resume_len=len(resume))
+    slog("resume", "plan_node", "进入规划", intent=intent, resume_len=len(resume))
 
     llm = get_chat_model("deepseek-v4-flash")
     prompt = PLAN_PROMPT.format(resume=resume, intent=intent)
@@ -108,6 +109,7 @@ def plan_node(state: ResumeState) -> dict[str, Any]:
         if "```" in raw:
             raw = raw.rsplit("```", 1)[0]
     raw = raw.strip()
+    slog("resume", "plan_node", "LLM 返回规划", raw_preview=raw[:200])
 
     try:
         steps = json.loads(raw)
@@ -121,6 +123,7 @@ def plan_node(state: ResumeState) -> dict[str, Any]:
         steps = ["按修改意图直接优化简历内容"]
 
     dlog("resume", "plan_node", "规划完成", steps_n=len(steps), steps=steps)
+    slog("resume", "plan_node", "规划完成", steps_n=len(steps), steps=steps)
     return {
         "plan_steps": steps,
         "steps_completed": 0,
@@ -132,6 +135,7 @@ def plan_confirm_node(state: ResumeState) -> dict[str, Any]:
     """人机交互：interrupt 等用户确认/建议计划。"""
     plan = state.get("plan_steps", [])
     dlog("resume", "plan_confirm_node", "interrupt 等待用户确认计划", plan_n=len(plan))
+    slog("resume", "plan_confirm_node", "interrupt 等待用户确认计划", plan_n=len(plan))
     value = interrupt(
         {
             "phase": "plan_confirm",
@@ -140,6 +144,7 @@ def plan_confirm_node(state: ResumeState) -> dict[str, Any]:
         }
     )
     dlog("resume", "plan_confirm_node", "收到用户回复", value=value)
+    slog("resume", "plan_confirm_node", "收到用户回复", value=value)
     # value: "approve" | {"decision":"suggest","suggestion":"..."}
     if isinstance(value, dict) and value.get("decision") == "suggest":
         suggestion = str(value.get("suggestion", ""))
@@ -202,7 +207,20 @@ def react_router(state: ResumeState) -> dict[str, Any]:
     _init_llm()
     done = state.get("steps_completed", 0)
     total = len(state.get("plan_steps", []))
-    dlog("resume", "react_router", "进入 ReAct 决策", steps_completed=done, steps_total=total)
+    dlog(
+        "resume",
+        "react_router",
+        "进入 ReAct 决策",
+        steps_completed=done,
+        steps_total=total,
+    )
+    slog(
+        "resume",
+        "react_router",
+        "进入 ReAct 决策",
+        steps_completed=done,
+        steps_total=total,
+    )
     system_prompt = REACT_PROMPT.format(
         draft=state.get("current_draft", ""),
         plan_with_progress=_render_plan_with_progress(state),
@@ -217,12 +235,36 @@ def react_router(state: ResumeState) -> dict[str, Any]:
     response = chain.invoke({"messages": state.get("messages", [])})
     tcs = getattr(response, "tool_calls", []) or []
     if tcs:
-        dlog("resume", "react_router", "LLM 决策调用工具",
-             tools=[t.get("name") for t in tcs])
+        dlog(
+            "resume",
+            "react_router",
+            "LLM 决策调用工具",
+            tools=[t.get("name") for t in tcs],
+        )
+        slog(
+            "resume",
+            "react_router",
+            "LLM 决策调用工具",
+            tools=[t.get("name") for t in tcs],
+        )
     else:
-        c = response.content if isinstance(response.content, str) else str(response.content)
-        dlog("resume", "react_router", "LLM 无 tool_call（将进 finalize）",
-             reply_len=len(c))
+        c = (
+            response.content
+            if isinstance(response.content, str)
+            else str(response.content)
+        )
+        dlog(
+            "resume",
+            "react_router",
+            "LLM 无 tool_call（将进 finalize）",
+            reply_len=len(c),
+        )
+        slog(
+            "resume",
+            "react_router",
+            "LLM 无 tool_call，将进 finalize",
+            reply_len=len(c),
+        )
     return {"messages": [response]}
 
 
@@ -251,13 +293,24 @@ async def rag_agent_in_resume_node(
 ) -> dict[str, Any]:
     """在 resume 子图内复用主图的 rag_agent_node（单例 _rag_graph 缓存）。"""
     dlog("resume", "rag_agent_in_resume", "复用 rag_agent_node 检索模板/知识")
+    slog("resume", "rag_agent_in_resume", "复用 rag_agent_node 检索模板/知识")
     from agent.tools.rag_agent import rag_agent_node
 
     # 把 ResumeState 的 messages 适配给 rag_agent_node（它读 MainState.messages）
     messages = state.get("messages", [])
     result = await rag_agent_node({"messages": messages}, config)
-    dlog("resume", "rag_agent_in_resume", "rag_agent_node 返回",
-         result_keys=list(result.keys()) if isinstance(result, dict) else "?")
+    dlog(
+        "resume",
+        "rag_agent_in_resume",
+        "rag_agent_node 返回",
+        result_keys=list(result.keys()) if isinstance(result, dict) else "?",
+    )
+    slog(
+        "resume",
+        "rag_agent_in_resume",
+        "rag_agent_node 返回",
+        result_keys=list(result.keys()) if isinstance(result, dict) else "?",
+    )
     return dict(result)
 
 
@@ -265,8 +318,20 @@ def step_confirm_node(state: ResumeState) -> dict[str, Any]:
     """人机交互：interrupt 展示 before/after，用户批准/拒绝/建议。"""
     before = state.get("last_draft", "")
     after = state.get("current_draft", "")
-    dlog("resume", "step_confirm_node", "interrupt 等待用户确认单步修改",
-         before_len=len(before), after_len=len(after))
+    dlog(
+        "resume",
+        "step_confirm_node",
+        "interrupt 等待用户确认单步修改",
+        before_len=len(before),
+        after_len=len(after),
+    )
+    slog(
+        "resume",
+        "step_confirm_node",
+        "interrupt 等待用户确认单步修改",
+        before_len=len(before),
+        after_len=len(after),
+    )
     value = interrupt(
         {
             "phase": "step_confirm",
@@ -275,6 +340,7 @@ def step_confirm_node(state: ResumeState) -> dict[str, Any]:
         }
     )
     dlog("resume", "step_confirm_node", "收到用户回复", value=value)
+    slog("resume", "step_confirm_node", "收到用户回复", value=value)
     # value: "approve" | "reject" | {"decision":"suggest","suggestion":"..."}
     if isinstance(value, dict) and value.get("decision") == "suggest":
         suggestion = str(value.get("suggestion", ""))
@@ -284,10 +350,12 @@ def step_confirm_node(state: ResumeState) -> dict[str, Any]:
         }
     if str(value).strip() in ("reject", "拒绝"):
         dlog("resume", "step_confirm_node", "用户拒绝，恢复 last_draft")
+        slog("resume", "step_confirm_node", "用户拒绝，恢复 last_draft")
         return {"current_draft": state.get("last_draft", "")}
     # approve
     new_done = state.get("steps_completed", 0) + 1
     dlog("resume", "step_confirm_node", "用户批准", steps_completed=new_done)
+    slog("resume", "step_confirm_node", "用户批准", steps_completed=new_done)
     return {"steps_completed": new_done}
 
 
@@ -298,8 +366,22 @@ def finalize_node(state: ResumeState) -> dict[str, Any]:
     draft = state.get("current_draft", "")
     done = state.get("steps_completed", 0)
     total = len(state.get("plan_steps", []))
-    dlog("resume", "finalize_node", "打包最终草稿退出子图",
-         steps_completed=done, steps_total=total, draft_len=len(draft))
+    dlog(
+        "resume",
+        "finalize_node",
+        "打包最终草稿退出子图",
+        steps_completed=done,
+        steps_total=total,
+        draft_len=len(draft),
+    )
+    slog(
+        "resume",
+        "finalize_node",
+        "打包最终草稿退出子图",
+        steps_completed=done,
+        steps_total=total,
+        draft_len=len(draft),
+    )
     summary = f"简历优化完成（完成 {done}/{total} 步）。最终草稿:\n{draft}"
     return {
         "messages": [ToolMessage(content=summary, tool_call_id="resume_finalize")],

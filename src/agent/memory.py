@@ -19,6 +19,7 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.store.base import BaseStore
 
+from agent.debug import slog
 from agent.state import MainState
 from src.client import get_chat_model
 
@@ -118,10 +119,12 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
 
     messages = state.get("messages", [])
     user_id = state.get("user_id", "default")
+    slog("main", "save_memory", "进入节点", user_id=user_id, msgs_n=len(messages))
 
     # 过滤：只保留 User + AI 消息
     relevant = [m for m in messages if isinstance(m, (HumanMessage, AIMessage))]
     if not relevant:
+        slog("main", "save_memory", "无 User/AI 消息，跳过")
         return {}
 
     # 读取已有事实用于去重
@@ -137,6 +140,7 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
         if existing_facts
         else "(无已有事实)"
     )
+    slog("main", "save_memory", "已有事实", existing_n=len(existing_facts))
 
     # 格式化对话
     conv_parts: list[str] = []
@@ -158,10 +162,12 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
         existing_facts=existing_str,
         conversation=conv_text,
     )
+    slog("main", "save_memory", "调用 LLM 提取事实")
     response = _extraction_llm.invoke(prompt)
     raw = (
         response.content if isinstance(response.content, str) else str(response.content)
     )
+    slog("main", "save_memory", "LLM 返回", raw_preview=raw[:200])
 
     # 清理可能的 markdown 代码块标记
     raw = raw.strip()
@@ -177,10 +183,12 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
         if not isinstance(new_facts, list):
             new_facts = []
     except json.JSONDecodeError:
+        slog("main", "save_memory", "JSON 解析失败，跳过", raw_preview=raw[:200])
         return {}
 
     # 写入 Store（按已有事实去重）
     known = set(existing_facts)
+    written: list[dict[str, Any]] = []
     for f in new_facts:
         if not isinstance(f, dict) or "fact" not in f:
             continue
@@ -194,6 +202,16 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
         }
         _store.put(("memory", user_id, "facts"), f"fact_{uuid4().hex[:8]}", entry)  # type: ignore[union-attr]
         known.add(text)
+        written.append(entry)
+        slog("main", "save_memory", "写入 Store", fact=text, category=entry["category"])
+
+    slog(
+        "main",
+        "save_memory",
+        "完成",
+        extracted_n=len(new_facts),
+        written_n=len(written),
+    )
 
     # 写入新事实后清除缓存，下一次 chat_node 自动重新加载
     _memory_cache.pop(user_id, None)

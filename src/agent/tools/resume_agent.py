@@ -3,13 +3,17 @@
 与 ``rag_agent`` 的集成方式**完全一致**：
 
 - ``resume_agent``（``@tool`` 装饰）：供 LLM ``bind_tools`` 的 Tool 对象。
-- ``resume_agent_node``：异步 LangGraph 节点函数。首次调用时从 ``config`` 获取
-  主图 checkpointer（可能为 ``_CustomCheckpointerAdapter`` 等异步适配器），
-  惰性编译子图并缓存，此后复用。子图调用使用 ``ainvoke`` 兼容异步 checkpointer。
+- ``resume_agent_node``：异步 LangGraph 节点函数。直接 ``import`` 模块级预编译的
+  resume 子图实例（``resume_agent.graph.graph``，编译时不带 checkpointer → 运行时
+  自动继承父图 checkpointer），用 ``ainvoke`` 调用。
 
-与 rag_agent 的**唯一差异**：resume 子图内部用 ``interrupt()`` 挂起。子图 ainvoke
-会抛 ``GraphInterrupt``，wrapper 必须透传该异常让主图线程也暂停；下一轮主图
-``Command(resume=...)`` 会精准恢复到子图挂起点（原型 phase5 已验证）。
+子图作为模块级实例被 wrapper 函数体直接引用，``find_subgraph_pregel`` 的 AST
+闭包分析可发现它 → ``PregelNode.subgraphs`` 被填充 → Studio 可展开子图内部节点
+（原型 ``phase5_inherit_cp_probe.py`` 验证通过）。
+
+resume 子图内部用 ``interrupt()`` 挂起。子图 ainvoke 会抛 ``GraphInterrupt``，
+wrapper 必须透传该异常让主图线程也暂停；下一轮主图 ``Command(resume=...)`` 会
+精准恢复到子图挂起点（checkpointer 由父图继承，子图状态持久化在共享命名空间）。
 """
 
 from __future__ import annotations
@@ -22,9 +26,9 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
 from pydantic import Field
 
-from agent.debug import dlog
+from agent.debug import dlog, slog
 from agent.state import MainState
-from resume_agent.graph import build_resume_workflow
+from resume_agent.graph import graph as resume_graph
 
 
 @tool
@@ -51,29 +55,27 @@ def resume_agent(
     )
 
 
-async def resume_agent_node(
-    state: MainState, config: RunnableConfig
-) -> dict[str, Any]:
+async def resume_agent_node(state: MainState, config: RunnableConfig) -> dict[str, Any]:
     """异步 resume_agent 包装节点。
 
-    首次调用时从 ``config.configurable.__pregel_checkpointer`` 获取主图 checkpointer
-    （可能为异步适配器），惰性编译子图并缓存。子图调用使用 ``ainvoke`` 兼容异步
-    checkpointer。
+    直接 ``import`` 模块级预编译的 resume 子图实例（``resume_graph``，编译时不带
+    checkpointer → 运行时自动继承父图 checkpointer），用 ``ainvoke`` 调用。
+
+    子图作为模块级实例在函数体被直接引用，``find_subgraph_pregel`` 的 AST 闭包
+    分析可发现它 → ``PregelNode.subgraphs`` 被填充 → Studio 可展开子图内部节点。
 
     子图 ``interrupt()`` 时 ``ainvoke`` 抛 ``GraphInterrupt``——本节点**透传**该异常，
     让主图线程暂停在 wrapper 节点；用户下一轮的 ``Command(resume=...)`` 会经主图
-    重新进入本节点，子图靠 checkpointer 从挂起点恢复继续（而非重跑）。
+    重新进入本节点，子图靠继承的父图 checkpointer 从挂起点恢复继续（而非重跑）。
     """
-    # ── 惰性编译子图（复用主图 checkpointer），只一次 ──
-    if getattr(resume_agent_node, "_resume_graph", None) is None:
-        cp = config.get("configurable", {}).get("__pregel_checkpointer")
-        dlog("resume", "resume_agent_node", "首次惰性编译 RESUME 子图",
-             checkpointer=type(cp).__name__ if cp else "None")
-        resume_agent_node._resume_graph = build_resume_workflow().compile(  # type: ignore[attr-defined]
-            name="ResumeAgent",
-            checkpointer=cp,
-        )
-    rg = resume_agent_node._resume_graph  # type: ignore[attr-defined]
+    # resume_graph 为模块级预编译实例（resume_agent.graph.graph），不传 checkpointer
+    # → 运行时自动继承父图 checkpointer（None fallthrough 到 configurable）
+    dlog(
+        "resume",
+        "resume_agent_node",
+        "调用 RESUME 子图（模块级实例，继承父图 checkpointer）",
+    )
+    slog("resume", "resume_agent_node", "进入节点")
 
     # ── 提取参数（intent）与原始简历 + 真实 tool_call_id ──
     messages = state.get("messages", [])
@@ -97,25 +99,50 @@ async def resume_agent_node(
                 original_resume = content
                 break
 
-    dlog("resume", "resume_agent_node", "调用 RESUME 子图",
-         intent=intent, resume_len=len(original_resume), tool_call_id=tool_call_id)
+    dlog(
+        "resume",
+        "resume_agent_node",
+        "调用 RESUME 子图",
+        intent=intent,
+        resume_len=len(original_resume),
+        tool_call_id=tool_call_id,
+    )
+    slog(
+        "resume",
+        "resume_agent_node",
+        "调用 RESUME 子图",
+        intent=intent,
+        resume_len=len(original_resume),
+    )
 
     # ── 调用子图（interrupt 时透传 GraphInterrupt） ──
-    # rag_agent_node 的 ainvoke 在子图 interrupt 时会抛 GraphInterrupt，
+    # resume_graph.ainvoke 在子图 interrupt 时会抛 GraphInterrupt，
     # 这里**不 catch**——透传给主图 Pregel 循环，让主图线程暂停在 wrapper 节点。
-    # 用户下一轮 Command(resume=...) 会经主图重新进入本节点，子图靠 checkpointer
-    # 从挂起点恢复继续（而非重跑）。
+    # 用户下一轮 Command(resume=...) 会经主图重新进入本节点，子图靠继承的父图
+    # checkpointer 从挂起点恢复继续（而非重跑）。
     try:
-        result = await rg.ainvoke(
+        result = await resume_graph.ainvoke(
             {"intent": intent, "original_resume": original_resume},
             config,
         )
     except GraphInterrupt:
-        dlog("resume", "resume_agent_node", "子图 interrupt，透传 GraphInterrupt（主图将挂起）")
+        dlog(
+            "resume",
+            "resume_agent_node",
+            "子图 interrupt，透传 GraphInterrupt（主图将挂起）",
+        )
+        slog("resume", "resume_agent_node", "子图 interrupt，透传 GraphInterrupt")
         raise
 
-    dlog("resume", "resume_agent_node", "RESUME 子图正常完成",
-         result_keys=list(result.keys()) if isinstance(result, dict) else type(result).__name__)
+    dlog(
+        "resume",
+        "resume_agent_node",
+        "RESUME 子图正常完成",
+        result_keys=list(result.keys())
+        if isinstance(result, dict)
+        else type(result).__name__,
+    )
+    slog("resume", "resume_agent_node", "RESUME 子图正常完成")
 
     # ── 子图 finalize：转发 ToolMessage + current_draft 到主图 ──
     sub_msgs: list[Any] = result.get("messages", [])
@@ -124,14 +151,21 @@ async def resume_agent_node(
     # "assistant tool_calls 未被响应" 报 400。
     out_msgs: list[Any] = []
     for m in sub_msgs:
-        if isinstance(m, ToolMessage) and getattr(m, "tool_call_id", "") == "resume_finalize":
+        if (
+            isinstance(m, ToolMessage)
+            and getattr(m, "tool_call_id", "") == "resume_finalize"
+        ):
             out_msgs.append(
                 ToolMessage(content=str(m.content), tool_call_id=tool_call_id)
             )
     if not out_msgs:
         # 兜底：构造一个响应主图 tool_call 的 ToolMessage
         draft = result.get("current_draft", "")
-        out_msgs = [ToolMessage(content=f"简历优化完成。最终草稿:\n{draft}", tool_call_id=tool_call_id)]
+        out_msgs = [
+            ToolMessage(
+                content=f"简历优化完成。最终草稿:\n{draft}", tool_call_id=tool_call_id
+            )
+        ]
 
     return {
         "messages": out_msgs,

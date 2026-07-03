@@ -27,7 +27,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.store.base import BaseStore
 
-from agent.debug import dlog, summarize_messages
+from agent.debug import dlog, slog, summarize_messages
 from agent.memory import load_memory_context, save_memory_node, set_store
 from agent.persistence import get_store
 from agent.state import MainState
@@ -93,13 +93,26 @@ def chat_node(state: MainState) -> dict[str, Any]:
         raise RuntimeError("chat_node 未初始化——请确保 _init_chat() 已被调用")
 
     user_id = state.get("user_id", "default")
-    dlog("main", "chat_node", "进入节点", user_id=user_id,
-         msgs=summarize_messages(state.get("messages", [])))
+    dlog(
+        "main",
+        "chat_node",
+        "进入节点",
+        user_id=user_id,
+        msgs=summarize_messages(state.get("messages", [])),
+    )
+    slog(
+        "main",
+        "chat_node",
+        "进入节点",
+        user_id=user_id,
+        msgs_n=len(state.get("messages", [])),
+    )
     mc = load_memory_context(user_id)
     system_prompt = _build_system_prompt()
     if mc:
         system_prompt += f"\n\n## Memory\n{mc}"
         dlog("main", "chat_node", "已注入长期记忆", memory_len=len(mc))
+        slog("main", "chat_node", "已注入长期记忆", memory_len=len(mc))
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -111,11 +124,20 @@ def chat_node(state: MainState) -> dict[str, Any]:
     response = chain.invoke({"messages": state.get("messages", [])})
     tcs = getattr(response, "tool_calls", []) or []
     if tcs:
-        dlog("main", "chat_node", "LLM 决策调用工具",
-             tools=[t.get("name") for t in tcs])
+        dlog(
+            "main", "chat_node", "LLM 决策调用工具", tools=[t.get("name") for t in tcs]
+        )
+        slog(
+            "main", "chat_node", "LLM 决策调用工具", tools=[t.get("name") for t in tcs]
+        )
     else:
-        c = response.content if isinstance(response.content, str) else str(response.content)
+        c = (
+            response.content
+            if isinstance(response.content, str)
+            else str(response.content)
+        )
         dlog("main", "chat_node", "LLM 直接回复", reply_len=len(c))
+        slog("main", "chat_node", "LLM 直接回复", reply_len=len(c))
     return {"messages": [response]}
 
 
@@ -175,9 +197,13 @@ def build_main_graph(
 
     # 初始化全局状态（chat_model + store）
     _init_chat(store)
-    dlog("main", "build_main_graph", "编译主图",
-         checkpointer=type(checkpointer).__name__ if checkpointer else "None",
-         tools=[getattr(t, "name", str(t)) for t in ALL_TOOLS])
+    dlog(
+        "main",
+        "build_main_graph",
+        "编译主图",
+        checkpointer=type(checkpointer).__name__ if checkpointer else "None",
+        tools=[getattr(t, "name", str(t)) for t in ALL_TOOLS],
+    )
 
     workflow = StateGraph(MainState)
 

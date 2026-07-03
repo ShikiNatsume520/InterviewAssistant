@@ -1,9 +1,13 @@
 """rag_agent 子智能体：Tool 定义 + 包装节点函数。
 
 - ``rag_agent``（``@tool`` 装饰）：供 LLM ``bind_tools`` 的 Tool 对象。
-- ``rag_agent_node``：异步 LangGraph 节点函数。首次调用时从 ``config`` 获取主图
-  checkpointer（可能为异步适配器），惰性编译子图并缓存，此后复用。
-  子图调用使用 ``ainvoke``，兼容异步 checkpointer 接口。
+- ``rag_agent_node``：异步 LangGraph 节点函数。直接 ``import`` 模块级预编译的
+  RAG 子图实例（``rag_agent.graph.graph``，编译时不带 checkpointer → 运行时
+  自动继承父图 checkpointer），用 ``ainvoke`` 调用。
+
+子图作为模块级实例被 wrapper 函数体直接引用，``find_subgraph_pregel`` 的 AST
+闭包分析可发现它 → ``PregelNode.subgraphs`` 被填充 → Studio 可展开子图内部节点
+（原型 ``phase5_inherit_cp_probe.py`` 验证通过）。
 """
 
 from __future__ import annotations
@@ -13,11 +17,12 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from langgraph.errors import GraphInterrupt
 from pydantic import Field
 
-from agent.debug import dlog
+from agent.debug import dlog, slog
 from agent.state import MainState
-from rag_agent.graph import build_rag_workflow
+from rag_agent.graph import graph as rag_graph
 from rag_agent.state import Citation
 
 
@@ -58,31 +63,32 @@ def rag_agent(
 async def rag_agent_node(state: MainState, config: RunnableConfig) -> dict[str, Any]:
     """异步 rag_agent 包装节点。
 
-    首次调用时从 ``config.configurable.__pregel_checkpointer`` 获取主图 checkpointer
-    （可能为 ``_CustomCheckpointerAdapter`` 等异步适配器），惰性编译子图并缓存。
-    子图调用使用 ``ainvoke`` 以兼容异步 checkpointer。
+    直接 ``import`` 模块级预编译的 RAG 子图实例（``rag_graph``，编译时不带
+    checkpointer → 运行时自动继承父图 checkpointer），用 ``ainvoke`` 调用。
+
+    子图作为模块级实例在函数体被直接引用，``find_subgraph_pregel`` 的 AST 闭包
+    分析可发现它 → ``PregelNode.subgraphs`` 被填充 → Studio 可展开子图内部节点。
+
+    当前 RAG 子图无 ``interrupt()``，但仍保留 ``GraphInterrupt`` 透传（与
+    ``resume_agent_node`` 一致，且为未来 RAG 可能加入的 HITL 预留）。
     """
-    # ── 惰性编译子图（复用主图 checkpointer），只一次 ──
-    if getattr(rag_agent_node, "_rag_graph", None) is None:
-        cp = config.get("configurable", {}).get("__pregel_checkpointer")
-        dlog("rag", "rag_agent_node", "首次惰性编译 RAG 子图",
-             checkpointer=type(cp).__name__ if cp else "None")
-        rag_agent_node._rag_graph = build_rag_workflow().compile(  # type: ignore[attr-defined]
-            name="RAGAgent",
-            checkpointer=cp,
-        )
-    rag_graph = rag_agent_node._rag_graph  # type: ignore[attr-defined]
+    # rag_graph 为模块级预编译实例（rag_agent.graph.graph），不传 checkpointer
+    # → 运行时自动继承父图 checkpointer（None fallthrough 到 configurable）
+    dlog("rag", "rag_agent_node", "调用 RAG 子图（模块级实例，继承父图 checkpointer）")
+    slog("rag", "rag_agent_node", "进入节点")
 
     # ── 提取参数并调用 ──
     messages = state.get("messages", [])
     if not messages:
         dlog("rag", "rag_agent_node", "无消息，返回空")
+        slog("rag", "rag_agent_node", "无消息，返回空")
         return {"citations": []}
 
     last_msg = messages[-1]
     tool_calls = getattr(last_msg, "tool_calls", [])
     if not tool_calls:
         dlog("rag", "rag_agent_node", "最后消息无 tool_call，返回空")
+        slog("rag", "rag_agent_node", "最后消息无 tool_call，返回空")
         return {"citations": []}
 
     tool_messages: list[ToolMessage] = []
@@ -92,22 +98,52 @@ async def rag_agent_node(state: MainState, config: RunnableConfig) -> dict[str, 
         args = tc.get("args", {})
         query = args.get("query", args.get("search_query", ""))
         stype = args.get("search_type", "semantic")
-        dlog("rag", "rag_agent_node", "调用 RAG 子图",
-             query=query, search_type=stype, tool_call_id=tc.get("id"))
-
-        # 异步调用子图，兼容异步 checkpointer（如 _CustomCheckpointerAdapter）
-        result = await rag_graph.ainvoke(
-            {
-                "search_query": query,
-                "search_type": stype,
-            },
-            config,
+        dlog(
+            "rag",
+            "rag_agent_node",
+            "调用 RAG 子图",
+            query=query,
+            search_type=stype,
+            tool_call_id=tc.get("id"),
         )
+        slog("rag", "rag_agent_node", "调用 RAG 子图", query=query, search_type=stype)
+
+        # 异步调用子图（模块级实例，继承父图 checkpointer）
+        # 当前 RAG 子图无 interrupt，try/except 透传 GraphInterrupt 为预留
+        try:
+            result = await rag_graph.ainvoke(
+                {
+                    "search_query": query,
+                    "search_type": stype,
+                },
+                config,
+            )
+        except GraphInterrupt:
+            dlog(
+                "rag",
+                "rag_agent_node",
+                "子图 interrupt，透传 GraphInterrupt（主图将挂起）",
+            )
+            slog("rag", "rag_agent_node", "子图 interrupt，透传 GraphInterrupt")
+            raise
 
         citations: list[Citation] = result.get("citations_output", [])
         gap_topic: str | None = result.get("gap_topic")
-        dlog("rag", "rag_agent_node", "RAG 子图返回",
-             citations_n=len(citations), gap_topic=gap_topic)
+        dlog(
+            "rag",
+            "rag_agent_node",
+            "RAG 子图返回",
+            citations_n=len(citations),
+            gap_topic=gap_topic,
+        )
+        slog(
+            "rag",
+            "rag_agent_node",
+            "RAG 子图返回",
+            citations_n=len(citations),
+            gap_topic=gap_topic,
+            files=[c.get("file_path") for c in citations],
+        )
 
         if gap_topic:
             content = f"未在知识库中找到「{gap_topic}」的相关内容。"
