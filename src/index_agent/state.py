@@ -49,7 +49,9 @@ class IndexRow(BaseModel):
 
     keywords: list[str] = Field(description="该索引项的核心关键词")
     summary: str = Field(description="该索引项的摘要，精炼不超过 100 字符")
-    files: list[str] = Field(description="该索引项指向的 markdown 文件名列表（不含路径）")
+    files: list[str] = Field(
+        description="该索引项指向的 markdown 文件名列表（不含路径）"
+    )
 
 
 class IndexUpdate(BaseModel):

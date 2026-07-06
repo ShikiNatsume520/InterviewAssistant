@@ -13,12 +13,12 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from agent.debug import slog
+from kernel.logging import slog
 from rag_agent.state import RAGState
 from rag_agent.tools.retrieval import aggregate_results, retrieve_pipeline
 
 
-def retrieve_node(state: RAGState) -> dict:
+def retrieve_node(state: RAGState) -> dict[str, Any]:
     """检索节点：按 search_type 分派管道，产出 raw_results。"""
     query = state.get("search_query", "")
     stype = state.get("search_type", "semantic")
@@ -28,7 +28,7 @@ def retrieve_node(state: RAGState) -> dict:
     return {"raw_results": results}
 
 
-def aggregate_node(state: RAGState) -> dict:
+def aggregate_node(state: RAGState) -> dict[str, Any]:
     """汇总节点：判 gap + 排序，产出 citations_output / gap_topic。"""
     results = state.get("raw_results", [])
     query = state.get("search_query", "")

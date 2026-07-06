@@ -1,11 +1,13 @@
-# src/agent/checkpointer.py
-import contextlib
+"""Checkpointer 入口（薄封装）。
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+逻辑已迁至 ``kernel.persistence.generate_checkpointer``（R0 重构）。本模块保留
+仅为 ``langgraph.json`` 的 checkpointer 路径仍指向
+``./src/agent/checkpointer.py:generate_checkpointer``；R3 物理重排时将更新
+langgraph.json 指向新路径或直接指向 kernel。
+"""
 
+from __future__ import annotations
 
-@contextlib.asynccontextmanager
-async def generate_checkpointer():
-    # 💡 强行指定和测试脚本一模一样的本地数据库路径
-    async with AsyncSqliteSaver.from_conn_string("./state_db.sqlite") as saver:
-        yield saver
+from kernel.persistence import generate_checkpointer  # noqa: F401
+
+__all__ = ["generate_checkpointer"]

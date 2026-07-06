@@ -136,7 +136,9 @@ def chunk_markdown(text: str, file_path: str) -> list[Chunk]:
         s_off = offsets[start_line - 1]
         e_off = offsets[end_line - 1] + len(lines[end_line - 1])
         if e_off - s_off <= MAX_CHARS:
-            chunks.append(_make_chunk(file_path, start_line, end_line, heading, full[s_off:e_off]))
+            chunks.append(
+                _make_chunk(file_path, start_line, end_line, heading, full[s_off:e_off])
+            )
             continue
         # 超长：按字符级二次切，带 overlap
         pos = s_off

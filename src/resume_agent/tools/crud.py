@@ -70,9 +70,7 @@ def _join_sections(sections: list[tuple[str, str]]) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _make_update(
-    runtime: ToolRuntime, new_draft: str, msg: str
-) -> Command[Any]:
+def _make_update(runtime: ToolRuntime, new_draft: str, msg: str) -> Command[Any]:
     """构造写回 state 的 ``Command``（含 last_draft 快照 + ToolMessage）。"""
     state: dict[str, Any] = dict(runtime.state)
     old = str(state.get("current_draft", ""))
@@ -80,17 +78,13 @@ def _make_update(
         update={
             "current_draft": new_draft,
             "last_draft": old,
-            "messages": [
-                ToolMessage(content=msg, tool_call_id=runtime.tool_call_id)
-            ],
+            "messages": [ToolMessage(content=msg, tool_call_id=runtime.tool_call_id)],
         }
     )
 
 
 @tool
-def add_section(
-    runtime: ToolRuntime, title: str, content: str
-) -> Command[Any]:
+def add_section(runtime: ToolRuntime, title: str, content: str) -> Command[Any]:
     """向简历追加一个新章节。
 
     Args:
@@ -108,9 +102,7 @@ def add_section(
 
 
 @tool
-def update_section(
-    runtime: ToolRuntime, title: str, new_content: str
-) -> Command[Any]:
+def update_section(runtime: ToolRuntime, title: str, new_content: str) -> Command[Any]:
     """替换指定章节的正文。
 
     Args:
@@ -154,9 +146,7 @@ def delete_section(runtime: ToolRuntime, title: str) -> Command[Any]:
 
 
 @tool
-def reorder_sections(
-    runtime: ToolRuntime, new_order: list[str]
-) -> Command[Any]:
+def reorder_sections(runtime: ToolRuntime, new_order: list[str]) -> Command[Any]:
     """按给定顺序重排现有章节。
 
     Args:

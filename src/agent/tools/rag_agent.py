@@ -20,8 +20,8 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
 from pydantic import Field
 
-from agent.debug import dlog, slog
 from agent.state import MainState
+from kernel.logging import dlog, slog
 from rag_agent.graph import graph as rag_graph
 from rag_agent.state import Citation
 

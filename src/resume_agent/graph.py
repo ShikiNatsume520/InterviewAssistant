@@ -43,10 +43,10 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 
-from agent.debug import dlog, slog
+from kernel.llm import get_chat_model
+from kernel.logging import dlog, slog
 from resume_agent.state import ResumeState
 from resume_agent.tools.crud import RESUME_CRUD_TOOLS
-from src.client import get_chat_model
 
 # --------------------------------------------------------------------------- #
 # 全局 LLM（惰性初始化，与 graph.py 的 _chat_model 同模式）

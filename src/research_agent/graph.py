@@ -39,26 +39,17 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
-from agent.debug import dlog, slog
+from kernel.llm import get_chat_model
+from kernel.logging import dlog, slog
+from kernel.paths import MARKDOWN_DIR
 from research_agent.state import ResearchNote, ResearchState
 from research_agent.tools.web_fetch import fetch_text
 from research_agent.tools.web_search import connectivity_probe, search
-from src.client import get_chat_model
-
-# --------------------------------------------------------------------------- #
-# 路径常量
-# --------------------------------------------------------------------------- #
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-"""项目根目录（src/ 的上两级）。"""
-
-MARKDOWN_DIR = PROJECT_ROOT / "data" / "markdown"
-"""本地 markdown 知识库目录（finalize 写入新深研资料的目标目录）。"""
 
 # --------------------------------------------------------------------------- #
 # 全局 LLM（惰性初始化，与 resume_agent.graph 同模式）

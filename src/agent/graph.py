@@ -27,14 +27,14 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.store.base import BaseStore
 
-from agent.debug import dlog, slog, summarize_messages
 from agent.memory import load_memory_context, save_memory_node, set_store
-from agent.persistence import get_store
 from agent.state import MainState
 from agent.tools.rag_agent import rag_agent, rag_agent_node
 from agent.tools.research_agent import research_agent, research_agent_node
 from agent.tools.resume_agent import resume_agent, resume_agent_node
-from src.client import get_chat_model
+from kernel.llm import get_chat_model
+from kernel.logging import dlog, slog, summarize_messages
+from kernel.persistence import get_store
 
 # --------------------------------------------------------------------------- #
 # 工具列表（后续新增子图时扩展）

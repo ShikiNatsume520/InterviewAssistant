@@ -20,18 +20,7 @@ from index_agent.tools.chunking import read_and_chunk
 from index_agent.tools.index_io import load_existing_index, write_index
 from index_agent.tools.llm_index import build_llm, update_index_via_llm
 from index_agent.tools.vectorstore import make_persistent_client, upsert_chunks
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-"""项目根目录（src/ 的上两级）。"""
-
-MARKDOWN_DIR = PROJECT_ROOT / "data" / "markdown"
-"""本地 markdown 知识库目录。"""
-
-INDEX_MD_PATH = PROJECT_ROOT / "data" / "index.md"
-"""LLM 维护的索引文件路径。"""
-
-CHROMA_PATH = PROJECT_ROOT / "data" / "chroma"
-"""Chroma 向量库持久化目录。"""
+from kernel.paths import CHROMA_PATH, INDEX_MD_PATH, MARKDOWN_DIR
 
 _llm = build_llm()
 """模块级 LLM 实例（避免每次节点调用重建，复用连接）。"""

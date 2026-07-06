@@ -14,28 +14,13 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kernel.embedder import COLLECTION_NAME
+from kernel.paths import CHROMA_PATH, MARKDOWN_DIR
+from kernel.paths import INDEX_MD_PATH as INDEX_MD
 from rag_agent.state import Citation, RawResult
 
 if TYPE_CHECKING:
     from chromadb.api.types import QueryResult
-
-# --------------------------------------------------------------------------- #
-# 路径常量
-# --------------------------------------------------------------------------- #
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-"""项目根目录（src/ 的上两级）。"""
-
-MARKDOWN_DIR = PROJECT_ROOT / "data" / "markdown"
-"""本地 markdown 知识库目录。"""
-
-INDEX_MD = PROJECT_ROOT / "data" / "index.md"
-"""LLM 维护的索引文件。"""
-
-CHROMA_PATH = PROJECT_ROOT / "data" / "chroma"
-"""Chroma 向量库持久化目录。"""
-
-COLLECTION_NAME = "knowledge_base"
-"""Chroma 单一 collection 名（与 index_agent 共享）。"""
 
 # --------------------------------------------------------------------------- #
 # 阈值常量
@@ -80,19 +65,20 @@ def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 def _extract_terms(query: str) -> list[str]:
     """解析关键词查询，支持引号包裹的短语。
-    示例: ' "StateGraph 状态管理" 检查点 "tool calling" ' 
+
+    示例: ' "StateGraph 状态管理" 检查点 "tool calling" '
           -> ['StateGraph 状态管理', '检查点', 'tool calling']
     """
     # 使用正则匹配引号内的内容，或者匹配不带引号的单词
     pattern = r'"([^"]*)"|(\S+)'
     matches = re.findall(pattern, query)
-    
+
     terms = []
     for quoted, unquoted in matches:
         if quoted:
-            terms.append(quoted)   # 保留引号内的完整短语
+            terms.append(quoted)  # 保留引号内的完整短语
         elif unquoted:
-            terms.append(unquoted) # 保留独立关键词
+            terms.append(unquoted)  # 保留独立关键词
     return terms
 
 
@@ -182,9 +168,7 @@ def keyword_retrieve(search_query: str) -> list[RawResult]:
     targets: list[Path] = []
     if candidate_files:
         targets = [
-            MARKDOWN_DIR / f
-            for f in candidate_files
-            if (MARKDOWN_DIR / f).exists()
+            MARKDOWN_DIR / f for f in candidate_files if (MARKDOWN_DIR / f).exists()
         ]
     else:
         targets = sorted(MARKDOWN_DIR.glob("*.md"))
@@ -213,9 +197,7 @@ def _expand_heading_sections(recalled: list[RawResult]) -> list[RawResult]:
 
     out: list[RawResult] = []
     for (fp, heading), chunks in groups.items():
-        ranges = _merge_ranges(
-            [(c["start_line"], c["end_line"]) for c in chunks]
-        )
+        ranges = _merge_ranges([(c["start_line"], c["end_line"]) for c in chunks])
         best_score = max(c["score"] for c in chunks)
         content = "\n".join(c["content"] for c in chunks)
         for s, e in ranges:
@@ -266,27 +248,32 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
     """
     import chromadb
 
-    from index_agent.tools.vectorstore import get_embed_fn
+    from kernel.embedder import get_embed_fn
 
     client = chromadb.PersistentClient(path=str(CHROMA_PATH))
     col = client.get_or_create_collection(
         COLLECTION_NAME, embedding_function=get_embed_fn()
     )
-    res: QueryResult = col.query(
-        query_texts=[search_query], n_results=VECTOR_N_RESULTS
+    res: QueryResult = col.query(query_texts=[search_query], n_results=VECTOR_N_RESULTS)
+    ids = res["ids"]
+    metas = res["metadatas"]
+    dists = res["distances"]
+    docs = res["documents"]
+    assert (
+        ids is not None and metas is not None and dists is not None and docs is not None
     )
 
     recalled: list[RawResult] = []
-    for i in range(len(res["ids"][0])):
-        meta = res["metadatas"][0][i]
-        dist = res["distances"][0][i]
+    for i in range(len(ids[0])):
+        meta = metas[0][i]
+        dist = dists[0][i]
         recalled.append(
             RawResult(
-                file_path=meta["file_path"],
-                start_line=int(meta["start_line"]),
-                end_line=int(meta["end_line"]),
+                file_path=str(meta["file_path"]),
+                start_line=int(meta["start_line"]),  # type: ignore[arg-type]
+                end_line=int(meta["end_line"]),  # type: ignore[arg-type]
                 heading=str(meta["heading"]),
-                content=res["documents"][0][i],
+                content=docs[0][i],
                 score=1.0 / (1.0 + dist),
                 source="vector",
             )
@@ -314,9 +301,7 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
 # --------------------------------------------------------------------------- #
 # 外部接口
 # --------------------------------------------------------------------------- #
-def retrieve_pipeline(
-    search_query: str, search_type: str
-) -> list[RawResult]:
+def retrieve_pipeline(search_query: str, search_type: str) -> list[RawResult]:
     """按 search_type 分派并执行对应管道。
 
     两种 ``search_type`` 对 ``search_query`` 的要求不同：
@@ -362,9 +347,7 @@ def aggregate_results(
     """
     if not raw_results:
         return [], search_query
-    ranked = sorted(
-        raw_results, key=lambda r: r["score"], reverse=True
-    )
+    ranked = sorted(raw_results, key=lambda r: r["score"], reverse=True)
     citations = [
         Citation(
             file_path=r["file_path"],

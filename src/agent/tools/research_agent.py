@@ -27,8 +27,8 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
 from pydantic import Field
 
-from agent.debug import dlog, slog
 from agent.state import MainState
+from kernel.logging import dlog, slog
 
 # 惰性加载 research_graph（避免循环依赖：research_agent.graph → agent.debug
 # → agent.__init__ → agent.graph → agent.tools.research_agent → research_agent.graph）。

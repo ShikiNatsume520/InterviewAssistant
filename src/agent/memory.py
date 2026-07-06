@@ -19,9 +19,9 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.store.base import BaseStore
 
-from agent.debug import slog
 from agent.state import MainState
-from src.client import get_chat_model
+from kernel.llm import get_chat_model
+from kernel.logging import slog
 
 # ═══════════════════════════════════════════════════════════════════════ #
 # 常量

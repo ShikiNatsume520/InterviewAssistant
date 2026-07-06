@@ -28,7 +28,7 @@ requires = ["setuptools>=73.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["langgraph.templates.agent", "agent", "index_agent", "rag_agent", "resume_agent", "research_agent"]
+packages = ["langgraph.templates.agent", "agent", "index_agent", "rag_agent", "resume_agent", "research_agent", "kernel"]
 [tool.setuptools.package-dir]
 "langgraph.templates.agent" = "src/agent"
 "" = "src"
@@ -36,6 +36,7 @@ packages = ["langgraph.templates.agent", "agent", "index_agent", "rag_agent", "r
 "index_agent" = "src/index_agent"
 "resume_agent" = "src/resume_agent"
 "research_agent" = "src/research_agent"
+"kernel" = "src/kernel"
 
 
 [tool.setuptools.package-data]

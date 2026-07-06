@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from langchain_core.runnables import Runnable
 
 from index_agent.state import Chunk, IndexRow, IndexUpdate
-from src.client import get_chat_model
+from kernel.llm import get_chat_model
 
 load_dotenv()
 
@@ -121,10 +121,11 @@ async def update_index_via_llm(
         return IndexUpdate.model_validate(args)
     # 兜底：未调用工具，尝试从文本抽 JSON
     content = getattr(msg, "content", "")
-    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    text = (
+        content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    )
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise RuntimeError(f"LLM 未调用工具且无 JSON 文本: {text[:120]}")
     return IndexUpdate.model_validate(json.loads(text[start : end + 1]))
-

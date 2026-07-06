@@ -26,8 +26,8 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
 from pydantic import Field
 
-from agent.debug import dlog, slog
 from agent.state import MainState
+from kernel.logging import dlog, slog
 from resume_agent.graph import graph as resume_graph
 
 

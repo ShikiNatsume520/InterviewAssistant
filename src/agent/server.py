@@ -34,9 +34,9 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from agent.debug import dlog
 from agent.graph import build_main_graph
-from agent.persistence import get_store
+from kernel.logging import dlog
+from kernel.persistence import get_store
 
 # --------------------------------------------------------------------------- #
 # 持久化文件
@@ -131,9 +131,15 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
     """
     graph = _state["graph"]
     config: dict[str, Any] = {"configurable": {"thread_id": req.thread_id}}
-    dlog("server", "/v1/chat", "收到请求",
-         user_id=req.user_id, thread_id=req.thread_id,
-         message_len=len(req.message), has_resume_value=req.resume_value is not None)
+    dlog(
+        "server",
+        "/v1/chat",
+        "收到请求",
+        user_id=req.user_id,
+        thread_id=req.thread_id,
+        message_len=len(req.message),
+        has_resume_value=req.resume_value is not None,
+    )
 
     async def event_gen() -> AsyncIterator[dict[str, str]]:
         # 先判断是否有 pending interrupt → 决定用 Command resume 还是新消息
@@ -141,10 +147,16 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
         dlog("server", "/v1/chat", f"pending_interrupt={pending}")
         if pending:
             # resume_value 优先；否则用 message（批准/拒绝/简单回复场景）
-            value: Any = req.resume_value if req.resume_value is not None else req.message
+            value: Any = (
+                req.resume_value if req.resume_value is not None else req.message
+            )
             input_data: Any = Command(resume=value)
-            dlog("server", "/v1/chat", "用 Command(resume=...) 恢复",
-                 value_type=type(value).__name__)
+            dlog(
+                "server",
+                "/v1/chat",
+                "用 Command(resume=...) 恢复",
+                value_type=type(value).__name__,
+            )
             # 先把当前 interrupt payload 推给前端（便于前端知晓上下文）
             yield {
                 "event": "interrupt",
@@ -197,8 +209,13 @@ async def chat(req: ChatRequest) -> EventSourceResponse:
                     c = getattr(last, "content", "")
                     last_ai = c if isinstance(c, str) else str(c)
             citations = state.values.get("citations", []) or []
-            dlog("server", "/v1/chat", "done",
-                 last_msg_len=len(last_ai), citations_n=len(citations))
+            dlog(
+                "server",
+                "/v1/chat",
+                "done",
+                last_msg_len=len(last_ai),
+                citations_n=len(citations),
+            )
             yield {
                 "event": "done",
                 "data": json.dumps(
@@ -218,7 +235,9 @@ async def health() -> dict[str, str]:
 
 
 # 静态前端：挂载 static/ 目录，``GET /`` 返回 index.html。
-_STATIC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_STATIC_DIR = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 _STATIC_DIR = os.path.join(_STATIC_DIR, "static")
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
