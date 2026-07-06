@@ -28,15 +28,12 @@ requires = ["setuptools>=73.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["langgraph.templates.agent", "agent", "index_agent", "rag_agent", "resume_agent", "research_agent", "kernel"]
+packages = ["kernel", "agents", "server"]
 [tool.setuptools.package-dir]
-"langgraph.templates.agent" = "src/agent"
 "" = "src"
-"agent" = "src/agent"
-"index_agent" = "src/index_agent"
-"resume_agent" = "src/resume_agent"
-"research_agent" = "src/research_agent"
 "kernel" = "src/kernel"
+"agents" = "src/agents"
+"server" = "src/server"
 
 
 [tool.setuptools.package-data]
@@ -68,6 +65,7 @@ lint.ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D", "UP"]
 "prototypes/*" = ["D", "T201", "UP"]
+"src/cli.py" = ["T201"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 

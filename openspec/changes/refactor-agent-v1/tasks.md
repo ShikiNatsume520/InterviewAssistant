@@ -36,39 +36,39 @@
 
 > 阶段目标：`"deepseek-v4-flash"` 等 5+ 处魔法字符串收进 `kernel/config.py`；`get_chat_model` 读 config；interrupt payload 用 Pydantic 固化进 `kernel/contracts.py`。验收：改 config 切模型生效 + HITL 流程 schema 校验通过。
 
-- [ ] 3.1 **协商 R2 边界**：陈述 config 实现方式（pydantic-settings vs 纯 os.getenv，见 design Open Questions）、模型名归类（chat/extraction/plan/distill/finalize）、interrupt schema 字段清单与现有 payload 的兼容性，与用户对齐后请求批准
-- [ ] 3.2 如选 pydantic-settings：提示用户安装 `pydantic-settings`（给出包名与用途），由用户安装；不得自行安装
-- [ ] 3.3 实现 `src/kernel/config.py`：集中 `CHAT_MODEL`（chat_node）、`EXTRACTION_MODEL`（memory）、`RESUME_MODEL`（resume plan/react）、`RESEARCH_MODELS`（outline/distill/finalize）+ provider 配置（base_url/api_key/model_provider 从 env 读）
-- [ ] 3.4 改造 `kernel/llm.py:get_chat_model`：默认从 config 读模型名，签名改为 `get_chat_model(model: str | None = None, tools=None)`；`model=None` 时按调用场景从 config 取
-- [ ] 3.5 替换 5+ 处硬编码：`agent/graph.py:88`、`agent/memory.py:159`、`resume_agent/graph.py:67,102`、`research_agent/graph.py:75-79` 改为 `get_chat_model()` 不传或传 config key
-- [ ] 3.6 验证无硬编码模型名：在 `src/` 搜索 `deepseek-v4-flash` 仅在 `kernel/config.py` 出现
-- [ ] 3.7 实现 `src/kernel/contracts.py`：Pydantic schema `PlanConfirmPayload`/`StepConfirmPayload`/`OutlineConfirmPayload`/`ConnectivityCheckPayload` + `ResumeDecision`（approve/reject/suggest）
-- [ ] 3.8 改造 `resume_agent/graph.py` 的 `plan_confirm_node`/`step_confirm_node`：`interrupt(...)` 传入的 dict 改用 contracts schema 构造/校验
-- [ ] 3.9 改造 `research_agent/graph.py` 的 `outline_confirm_node`/`connectivity_check_node`：同上用 contracts schema
-- [ ] 3.10 改造 `src/agent/server.py` 的 `_interrupt_payload` 与 `resume_value` 解析：用 contracts schema 序列化/反序列化；验证 SSE `interrupt` 事件字段名与重构前兼容（`static/index.html` 不改可解析）
-- [ ] 3.11 **R2 验收**：改 config 模型名 → 重启 → 端到端验证模型切换生效；跑一次完整 HITL 流程（简历优化 plan/step confirm + 深研 outline confirm）验证 payload schema 校验通过且前端正常交互
-- [ ] 3.12 **R2 存档**：用户验收通过后 git 提交 R2
+- [x] 3.1 **协商 R2 边界**：陈述 config 实现方式（pydantic-settings vs 纯 os.getenv，见 design Open Questions）、模型名归类（chat/extraction/plan/distill/finalize）、interrupt schema 字段清单与现有 payload 的兼容性，与用户对齐后请求批准
+- [x] 3.2 ~N/A~：选 os.getenv（无新依赖），无需安装 pydantic-settings
+- [x] 3.3 实现 `src/kernel/config.py`：集中 `CHAT_MODEL`（chat_node）、`EXTRACTION_MODEL`（memory）、`RESUME_MODEL`（resume plan/react）、`RESEARCH_MODEL`（outline/distill/finalize）+ `DEFAULT_MODEL` 兜底 + provider 配置（DEEPSEEK_API_KEY/URL 从 env 读）
+- [x] 3.4 改造 `kernel/llm.py:get_chat_model`：默认从 config 读模型名，签名改为 `get_chat_model(model: str | None = None, tools=None)`；`model=None` 时用 `DEFAULT_MODEL`
+- [x] 3.5 替换 8 处硬编码（含 index_agent）：`agent/graph.py`、`agent/memory.py`、`index_agent/tools/llm_index.py`、`resume_agent/graph.py`(×2)、`research_agent/graph.py`(×3) 改为传 config 常量
+- [x] 3.6 验证无硬编码模型名：在 `src/` 搜索 `deepseek-v4-flash` 仅在 `kernel/config.py` 出现
+- [x] 3.7 实现 `src/kernel/contracts.py`：Pydantic schema `PlanConfirmPayload`/`StepConfirmPayload`/`OutlineConfirmPayload`/`ConnectivityCheckPayload` + `SuggestDecision`
+- [x] 3.8 改造 `resume_agent/graph.py` 的 `plan_confirm_node`/`step_confirm_node`：`interrupt(...)` 传入的 dict 改用 contracts schema 构造 + `model_dump()`
+- [x] 3.9 改造 `research_agent/graph.py` 的 `outline_confirm_node`/`connectivity_check_node`：同上用 contracts schema
+- [x] 3.10 改造 `src/agent/server.py` 的 `_interrupt_payload`：用 contracts schema `model_validate` + `model_dump` 校验序列化；SSE `interrupt` 事件字段名与重构前兼容（`static/index.html` 不改可解析）
+- [x] 3.11 **R2 验收**：改 config 模型名 → 重启 → 端到端验证模型切换生效；跑一次完整 HITL 流程（简历优化 plan/step confirm + 深研 outline confirm）验证 payload schema 校验通过且前端正常交互
+- [x] 3.12 **R2 存档**：用户验收通过后 git 提交 R2
 
 ## 4. R3 物理重排 — 目录迁移到方案 C
 
 > 阶段目标：`src/agent/` → `src/agents/main/`，四子 agent 归 `src/agents/<name>/`，`server.py` → `src/server/app.py`，新增 `src/cli.py`；更新 `langgraph.json`/`pyproject.toml`。验收：`langgraph dev` + tests/ 全绿。
 
-- [ ] 4.1 **协商 R3 边界**：陈述迁移批次顺序（建议：先建 `src/agents/` 骨架 → 逐个 agent 切 → 最后删旧 `src/agent/`）、import 全量更新范围、tests 同步更新，与用户对齐后请求批准
-- [ ] 4.2 创建 `src/agents/__init__.py`（最小化）与 `src/agents/main/__init__.py`（最小化）
-- [ ] 4.3 迁移 `src/agent/{graph,state,registry,routing,memory}.py` → `src/agents/main/`，拆分 `nodes/`（chat.py / memory.py）与 `tools/`（rag_agent.py / resume_agent.py / research_agent.py）子目录
-- [ ] 4.4 迁移四子 agent：`src/rag_agent/` → `src/agents/rag/`、`src/resume_agent/` → `src/agents/resume/`、`src/research_agent/` → `src/agents/research/`、`src/index_agent/` → `src/agents/index/`（含各自 state.py / graph.py / tools/）
-- [ ] 4.5 迁移 `src/agent/server.py` → `src/server/app.py`，挂载 `src/server/__init__.py`
-- [ ] 4.6 新增 `src/cli.py`：index_agent 主动唤醒命令入口（仅骨架 + 调用 index_agent 图，不实现额外功能——遵循不跨阶段占位）
-- [ ] 4.7 抽取 main prompts 到 `src/agents/main/prompts.py`：`_build_system_prompt()`（graph.py）+ `EXTRACTION_PROMPT`（memory.py）迁入，节点改 `from .prompts import ...`；含变量的封装为 `build_*()` 函数
-- [ ] 4.8 抽取 resume prompts 到 `src/agents/resume/prompts.py`：`PLAN_PROMPT` + `REACT_PROMPT` 迁入，封装为 `build_plan_prompt(resume, intent)` / `build_react_prompt(draft, plan_with_progress)` 函数
-- [ ] 4.9 抽取 research prompts 到 `src/agents/research/prompts.py`：`OUTLINE_PROMPT` + `DISTILL_PROMPT` + `FINALIZE_PROMPT` 迁入，含变量的封装为 `build_*()` 函数
-- [ ] 4.10 全量更新 import 路径：`from agent.` → `from agents.main.`、`from rag_agent.` → `from agents.rag.`、`from resume_agent.` → `from agents.resume.`、`from research_agent.` → `from agents.research.`、`from index_agent.` → `from agents.index.`
-- [ ] 4.11 更新 `langgraph.json`：五个图路径改为 `./src/agents/<name>/graph.py:graph`，checkpointer 改指 `./src/agents/main/checkpointer.py:generate_checkpointer`（若 checkpointer 仍留 main 包内）或迁至 kernel
-- [ ] 4.12 更新 `pyproject.toml`：`[tool.setuptools]` 包映射改为 `kernel`/`agents`/`server` + `package-dir` 指向 `src/<name>`；删除旧 `agent`/`rag_agent` 等映射
-- [ ] 4.13 更新 `tests/`：`from agent.graph import graph` → `from agents.main.graph import graph` 等同步；跑 `make lint_tests`
-- [ ] 4.14 删除旧 `src/agent/`、`src/client.py`（已迁）、旧子 agent 目录（确认无残留引用后）
-- [ ] 4.15 **R3 验收**：`langgraph dev` 起图加载五个图无 import 错误；`make lint`（ruff + mypy --strict + codespell）通过；`make test` 全绿；Studio 展开三个子图正常；`/v1/chat` 端到端跑通；各 agent `prompts.py` 存在且节点无内联 prompt 字符串常量
-- [ ] 4.16 **R3 存档**：用户验收通过后 git 提交 R3（可打 tag 标记重构完成）
+- [x] 4.1 **协商 R3 边界**：陈述迁移批次顺序（建议：先建 `src/agents/` 骨架 → 逐个 agent 切 → 最后删旧 `src/agent/`）、import 全量更新范围、tests 同步更新，与用户对齐后请求批准
+- [x] 4.2 创建 `src/agents/__init__.py`（最小化）与 `src/agents/main/__init__.py`（最小化）
+- [x] 4.3 迁移 `src/agent/{graph,state,registry,routing,memory}.py` → `src/agents/main/`，拆分 `nodes/`（chat.py / memory.py）与 `tools/`（rag_agent.py / resume_agent.py / research_agent.py）子目录
+- [x] 4.4 迁移四子 agent：`src/rag_agent/` → `src/agents/rag/`、`src/resume_agent/` → `src/agents/resume/`、`src/research_agent/` → `src/agents/research/`、`src/index_agent/` → `src/agents/index/`（含各自 state.py / graph.py / tools/）
+- [x] 4.5 迁移 `src/agent/server.py` → `src/server/app.py`，挂载 `src/server/__init__.py`
+- [x] 4.6 新增 `src/cli.py`：index_agent 主动唤醒命令入口（仅骨架 + 调用 index_agent 图，不实现额外功能——遵循不跨阶段占位）
+- [x] 4.7 抽取 main prompts 到 `src/agents/main/prompts.py`：`_build_system_prompt()`（graph.py）+ `EXTRACTION_PROMPT`（memory.py）迁入，节点改 `from .prompts import ...`；含变量的封装为 `build_*()` 函数
+- [x] 4.8 抽取 resume prompts 到 `src/agents/resume/prompts.py`：`PLAN_PROMPT` + `REACT_PROMPT` 迁入，封装为 `build_plan_prompt(resume, intent)` / `build_react_prompt(draft, plan_with_progress)` 函数
+- [x] 4.9 抽取 research prompts 到 `src/agents/research/prompts.py`：`OUTLINE_PROMPT` + `DISTILL_PROMPT` + `FINALIZE_PROMPT` 迁入，含变量的封装为 `build_*()` 函数
+- [x] 4.10 全量更新 import 路径：`from agent.` → `from agents.main.`、`from rag_agent.` → `from agents.rag.`、`from resume_agent.` → `from agents.resume.`、`from research_agent.` → `from agents.research.`、`from index_agent.` → `from agents.index.`
+- [x] 4.11 更新 `langgraph.json`：五个图路径改为 `./src/agents/<name>/graph.py:graph`，checkpointer 改指 `./src/agents/main/checkpointer.py:generate_checkpointer`
+- [x] 4.12 更新 `pyproject.toml`：`[tool.setuptools]` 包映射改为 `kernel`/`agents`/`server` + `package-dir` 指向 `src/<name>`；删除旧 `agent`/`rag_agent` 等映射
+- [x] 4.13 更新 `tests/`：tests 无旧 import（grep 确认无残留），无需改动
+- [x] 4.14 删除旧 `src/agent/`、`src/client.py`（R0 已删）、旧子 agent 目录（git mv 后旧目录已不存在）
+- [x] 4.15 **R3 验收**：`langgraph dev` 起图加载五个图无 import 错误；`make lint`（ruff + mypy --strict + codespell）通过；`make test` 全绿；Studio 展开三个子图正常；`/v1/chat` 端到端跑通；各 agent `prompts.py` 存在且节点无内联 prompt 字符串常量
+- [x] 4.16 **R3 存档**：用户验收通过后 git 提交 R3（可打 tag 标记重构完成）
 
 ## 5. 跨阶段约束（贯穿 R0–R3）
 

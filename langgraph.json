@@ -2,16 +2,16 @@
   "$schema": "https://langgra.ph/schema.json",
   "dependencies": ["."],
   "graphs": {
-    "main_agent": "./src/agent/graph.py:graph",
-    "index_agent": "./src/index_agent/graph.py:graph",
-    "rag_agent": "./src/rag_agent/graph.py:graph",
-    "resume_agent": "./src/resume_agent/graph.py:graph",
-    "research_agent": "./src/research_agent/graph.py:graph"
+    "main_agent": "./src/agents/main/graph.py:graph",
+    "index_agent": "./src/agents/index/graph.py:graph",
+    "rag_agent": "./src/agents/rag/graph.py:graph",
+    "resume_agent": "./src/agents/resume/graph.py:graph",
+    "research_agent": "./src/agents/research/graph.py:graph"
   },
   "env": ".env",
   "image_distro": "wolfi",
   "checkpointer": {
-    "path": "./src/agent/checkpointer.py:generate_checkpointer"
-    
+    "path": "./src/agents/main/checkpointer.py:generate_checkpointer"
+
   }
 }
