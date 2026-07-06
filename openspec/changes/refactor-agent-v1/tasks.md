@@ -16,21 +16,21 @@
 - [x] 1.12 `src/agent/__init__.py` 最小化：移除 eager `from agent.graph import graph`，仅留必要导出；验证 `import agent.graph` 不连带拉起整图 LLM 实例化
 - [x] 1.13 验证循环依赖已断：`python -c "import agent.graph"` 不报 `ImportError`/`RecursionError`
 - [x] 1.14 **R0 验收**：`langgraph dev` 起图成功；Studio 中 main_agent 可展开 rag/resume 子图；FastAPI `/v1/chat` 端到端跑通一轮知识问答
-- [ ] 1.15 **R0 存档**：用户验收通过后，按用户指引 git 提交 R0
+- [x] 1.15 **R0 存档**：用户验收通过后，按用户指引 git 提交 R0
 
 ## 2. R1 registry — 可拔插布线 + 修复 research Studio 发现
 
 > 阶段目标：引入 `agents/main/registry.py` 显式清单 + `routing.py` 查表路由；三 wrapper 统一为模块顶层 import 已编译子图（修复 `research_agent` 惰性 getter 的 Studio 展不开 bug）；`build_main_graph` 遍历 REGISTRY 布线。验收：Studio 首次展开 research 子图 + SSE 端到端跑通。
 
-- [ ] 2.1 **协商 R1 边界**：陈述 `SubAgentMeta` 结构、`REGISTRY`/`ROUTE_TABLE` 派生关系、wrapper 顶层 import 改造范围，与用户对齐后请求批准
-- [ ] 2.2 创建 `src/agent/registry.py`：定义 `SubAgentMeta`（TypedDict：`name`/`tool`/`node`/`route_key`）+ `REGISTRY: list[SubAgentMeta]` 显式清单（先登记 rag/resume/research 三条）+ `ROUTE_TABLE`（`{m.tool.name: m.route_key}`）+ `ALL_TOOLS`（`BASIC_TOOLS + [m.tool for m in REGISTRY]`）
-- [ ] 2.3 创建 `src/agent/routing.py`：迁入 `route_after_chat`，改为 `return ROUTE_TABLE.get(tool_name, "tools_node")` 查表，删除 if-elif 链
-- [ ] 2.4 改造 `src/agent/tools/research_agent.py`：删除 `_get_research_graph()` 惰性函数，改为模块顶层 `from research_agent.graph import graph as research_graph`，函数体裸名 `await research_graph.ainvoke(...)`
-- [ ] 2.5 确认 `src/agent/tools/rag_agent.py`、`resume_agent.py` 已是顶层 import（无需改），仅在 registry 接入时验证不退化
-- [ ] 2.6 改造 `src/agent/graph.py`：`build_main_graph` 遍历 `REGISTRY` 做 `add_node`/`add_edge`/`path_map`；删除手写的三条 `add_node`/`add_edge` 与 `path_map` 字面量；`chat_node` 的 `bind_tools(ALL_TOOLS)` 改引用 registry 的 `ALL_TOOLS`
-- [ ] 2.7 验证 Studio 子图发现：编译主图后断言 `compiled.nodes["research_agent"].subgraphs` 非空（可用原型脚本模式或 Studio 实际打开验证三个子图均可展开）
-- [ ] 2.8 **R1 验收**：Studio 中 main_agent 可展开 rag/resume/research 三种子图（research 为首次修复）；`/v1/chat` 端到端跑通知识问答 + 简历优化 + 深研 HITL 流程
-- [ ] 2.9 **R1 存档**：用户验收通过后 git 提交 R1
+- [x] 2.1 **协商 R1 边界**：陈述 `SubAgentMeta` 结构、`REGISTRY`/`ROUTE_TABLE` 派生关系、wrapper 顶层 import 改造范围，与用户对齐后请求批准
+- [x] 2.2 创建 `src/agent/registry.py`：定义 `SubAgentMeta`（TypedDict：`name`/`tool`/`node`/`route_key`）+ `REGISTRY: list[SubAgentMeta]` 显式清单（先登记 rag/resume/research 三条）+ `ROUTE_TABLE`（`{m.tool.name: m.route_key}`）+ `ALL_TOOLS`（`BASIC_TOOLS + [m.tool for m in REGISTRY]`）
+- [x] 2.3 创建 `src/agent/routing.py`：迁入 `route_after_chat`，改为 `return ROUTE_TABLE.get(tool_name, "tools_node")` 查表，删除 if-elif 链
+- [x] 2.4 改造 `src/agent/tools/research_agent.py`：删除 `_get_research_graph()` 惰性函数，改为模块顶层 `from research_agent.graph import graph as research_graph`，函数体裸名 `await research_graph.ainvoke(...)`
+- [x] 2.5 确认 `src/agent/tools/rag_agent.py`、`resume_agent.py` 已是顶层 import（无需改），仅在 registry 接入时验证不退化
+- [x] 2.6 改造 `src/agent/graph.py`：`build_main_graph` 遍历 `REGISTRY` 做 `add_node`/`add_edge`/`path_map`；删除手写的三条 `add_node`/`add_edge` 与 `path_map` 字面量；`chat_node` 的 `bind_tools(ALL_TOOLS)` 改引用 registry 的 `ALL_TOOLS`
+- [x] 2.7 验证 Studio 子图发现：编译主图后断言 `compiled.nodes["research_agent"].subgraphs` 非空（可用原型脚本模式或 Studio 实际打开验证三个子图均可展开）
+- [x] 2.8 **R1 验收**：Studio 中 main_agent 可展开 rag/resume/research 三种子图（research 为首次修复）；`/v1/chat` 端到端跑通知识问答 + 简历优化 + 深研 HITL 流程
+- [x] 2.9 **R1 存档**：用户验收通过后 git 提交 R1
 
 ## 3. R2 模型配置化 + interrupt 契约固化
 

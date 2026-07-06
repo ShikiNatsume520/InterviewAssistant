@@ -11,11 +11,9 @@
 3. 子智能体节点直接模块级导入编译后的子图，Studio 可静态追踪。
 4. 主图 + 子图共用持久化层，实现崩溃恢复与状态回放。
 
-无动态注册表。新增子智能体时只需：
-  a. 定义 @tool + 包装节点函数
-  b. 将 tool 加入 ``ALL_TOOLS``
-  c. 在 ``route_after_chat`` 和 ``path_map`` 中添加路由
-  d. 在 ``build_main_graph`` 中 ``add_node`` + ``add_edge``
+子智能体由 ``agent.registry`` 的显式清单 ``REGISTRY`` 布线（R1 重构）。新增子智能体只需：
+  a. 在 ``agent/tools/`` 写 ``@tool`` + 静态 wrapper 节点（模块顶层 import 已编译子图）
+  b. 在 ``agent/registry.py`` 的 ``REGISTRY`` 追加一行
 """
 
 from __future__ import annotations
@@ -28,10 +26,9 @@ from langgraph.prebuilt import ToolNode
 from langgraph.store.base import BaseStore
 
 from agent.memory import load_memory_context, save_memory_node, set_store
+from agent.registry import REGISTRY
+from agent.routing import route_after_chat
 from agent.state import MainState
-from agent.tools.rag_agent import rag_agent, rag_agent_node
-from agent.tools.research_agent import research_agent, research_agent_node
-from agent.tools.resume_agent import resume_agent, resume_agent_node
 from kernel.llm import get_chat_model
 from kernel.logging import dlog, slog, summarize_messages
 from kernel.persistence import get_store
@@ -43,8 +40,8 @@ from kernel.persistence import get_store
 BASIC_TOOLS: list[Any] = []
 """普通工具列表（直接由 ToolNode 执行，无需包装节点拦截）。"""
 
-ALL_TOOLS: list[Any] = BASIC_TOOLS + [rag_agent, resume_agent, research_agent]
-"""LLM bind_tools 的完整工具列表（含子智能体工具）。"""
+ALL_TOOLS: list[Any] = BASIC_TOOLS + [m["tool"] for m in REGISTRY]
+"""LLM bind_tools 的完整工具列表（含子智能体工具，由 ``REGISTRY`` 派生）。"""
 
 
 # --------------------------------------------------------------------------- #
@@ -146,42 +143,6 @@ def chat_node(state: MainState) -> dict[str, Any]:
     return {"messages": [response]}
 
 
-def route_after_chat(state: MainState) -> str:
-    """``chat_node`` 的条件路由。
-
-    检查最后一条消息的 ``tool_calls``:
-
-    - 无 ``tool_call`` → ``"save_memory"``
-    - 工具名为子智能体 → 对应 ``wrapper`` 节点（后续新增时扩展）
-    - 否则 → ``"tools_node"``
-    """
-    messages = state.get("messages", [])
-    if not messages:
-        dlog("main", "route_after_chat", "无消息 → save_memory")
-        return "save_memory"
-
-    tool_calls = getattr(messages[-1], "tool_calls", [])
-    if not tool_calls:
-        dlog("main", "route_after_chat", "无 tool_call → save_memory")
-        return "save_memory"
-
-    tool_name: str = str(tool_calls[0].get("name", ""))
-
-    # 子智能体路由（后续新增子图时扩展）
-    if tool_name == "rag_agent":
-        dlog("main", "route_after_chat", f"→ rag_agent (tool={tool_name})")
-        return "rag_agent"
-    if tool_name == "resume_agent":
-        dlog("main", "route_after_chat", f"→ resume_agent (tool={tool_name})")
-        return "resume_agent"
-    if tool_name == "research_agent":
-        dlog("main", "route_after_chat", f"→ research_agent (tool={tool_name})")
-        return "research_agent"
-
-    dlog("main", "route_after_chat", f"→ tools_node (tool={tool_name})")
-    return "tools_node"
-
-
 # --------------------------------------------------------------------------- #
 # 主图构建
 # --------------------------------------------------------------------------- #
@@ -215,13 +176,12 @@ def build_main_graph(
 
     workflow = StateGraph(MainState)
 
-    # ── 节点：静态注册，全部加载 ──
+    # ── 节点：chat + 普通工具 + 记忆 + 子智能体（遍历 REGISTRY） ──
     workflow.add_node("chat_node", chat_node)
-    workflow.add_node("rag_agent", rag_agent_node)
-    workflow.add_node("resume_agent", resume_agent_node)
-    workflow.add_node("research_agent", research_agent_node)
     workflow.add_node("tools_node", ToolNode(BASIC_TOOLS))
     workflow.add_node("save_memory", save_memory_node)
+    for meta in REGISTRY:
+        workflow.add_node(meta["name"], meta["node"])
 
     # ── 连线 ──
     workflow.set_entry_point("chat_node")
@@ -229,27 +189,17 @@ def build_main_graph(
     path_map: dict[Any, str] = {
         "save_memory": "save_memory",
         "tools_node": "tools_node",
-        "rag_agent": "rag_agent",
-        "resume_agent": "resume_agent",
-        "research_agent": "research_agent",
     }
+    path_map.update({m["route_key"]: m["name"] for m in REGISTRY})
 
-    workflow.add_conditional_edges(
-        "chat_node",
-        route_after_chat,
-        path_map,
-    )
+    workflow.add_conditional_edges("chat_node", route_after_chat, path_map)
 
-    workflow.add_edge("rag_agent", "chat_node")
-    workflow.add_edge("resume_agent", "chat_node")
-    workflow.add_edge("research_agent", "chat_node")
     workflow.add_edge("tools_node", "chat_node")
     workflow.add_edge("save_memory", END)
+    for meta in REGISTRY:
+        workflow.add_edge(meta["name"], "chat_node")
 
-    return workflow.compile(
-        name="MainAgent",
-        checkpointer=checkpointer,
-    )
+    return workflow.compile(name="MainAgent", checkpointer=checkpointer)
 
 
 # =========================================================================== #

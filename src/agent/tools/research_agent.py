@@ -29,22 +29,7 @@ from pydantic import Field
 
 from agent.state import MainState
 from kernel.logging import dlog, slog
-
-# 惰性加载 research_graph（避免循环依赖：research_agent.graph → agent.debug
-# → agent.__init__ → agent.graph → agent.tools.research_agent → research_agent.graph）。
-# 实际调用时初始化，缓存后复用；模块级 import 改为惰性不影响 Studio 子图展开
-# （展开发生在运行时 AST 分析，graph 实例由引用可被闭包分析发现）。
-_research_graph: Any = None
-
-
-def _get_research_graph() -> Any:
-    """惰性获取 research 子图实例（首次调用时 import 并缓存）。"""
-    global _research_graph
-    if _research_graph is None:
-        from research_agent.graph import graph as rg
-
-        _research_graph = rg
-    return _research_graph
+from research_agent.graph import graph as research_graph
 
 
 @tool
@@ -119,7 +104,6 @@ async def research_agent_node(
     slog("research", "research_agent_node", "调用 RESEARCH 子图", gap_topic=gap_topic)
 
     # ── 调用子图（interrupt 时透传 GraphInterrupt） ──
-    research_graph = _get_research_graph()
     try:
         result = await research_graph.ainvoke({"gap_topic": gap_topic}, config)
     except GraphInterrupt:
