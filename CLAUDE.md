@@ -38,39 +38,29 @@ CI（[.github/workflows/unit-tests.yml](.github/workflows/unit-tests.yml)）在 
 ## 架构关键点
 
 ### 入口与打包
-- [langgraph.json](langgraph.json) 把图注册为 `main_agent`，指向 `./src/agent/graph.py:graph`，env 文件为 `.env`。
-- [pyproject.toml](pyproject.toml) 把同一份 `src/agent` 同时映射为两个包：`agent` 和 `langgraph.templates.agent`。导入时用 `from agent.graph import graph`（测试中就是这么写的）。
-- 运行时上下文通过 `Context`（TypedDict）+ `context_schema=` 暴露，可在创建 assistant 或 invoke 时覆盖（见 graph.py 注释链接）。
+- [langgraph.json](langgraph.json) 注册 5 个图：`main_agent`（`./src/agent/graph.py:graph`）、`index_agent` / `rag_agent` / `resume_agent` / `research_agent`（各指向 `src/<agent>/graph.py:graph`）；checkpointer 指向 `./src/agent/checkpointer.py:generate_checkpointer`；env 文件为 `.env`。
+- [pyproject.toml](pyproject.toml) 把 `src/agent` 同时映射为两个包：`agent` 和 `langgraph.templates.agent`。导入时用 `from agent.graph import graph`（测试中就是这么写的）。
 
-### 目标架构（设计文档，尚未实现）
-设计文档定义的多智能体拓扑，后续实现时应遵循其约定：
+### 当前架构
 
-- **主图 `MainState`**：`messages`（`add_messages` 累积）、`citations`、以及为每个子图预留的**隔离 I/O 槽位**（如 `rag_subgraph_input` / `rag_subgraph_output`、`research_subgraph_input` / `research_subgraph_output`）。主图与子图状态通过槽位交互，**不直接交叉污染**（状态隔离原则）。
-- **动态子智能体注册（`AgentRegistry`）**：通过 `SubAgentMetaData` 注册 wrapper 节点函数、input/output 槽名；`generate_system_instruction()` 动态拼装注入 `chat_node` 的子智能体列表 Prompt；`build_main_graph()` 据此循环 `add_node` / `add_edge` 构建可拔插拓扑。
-- **`chat_node` 结构化决策**：用 `with_structured_output(AgentAction)` 强制 LLM 在 `chat` / `tool` / `sub_agent` 三种 action 间决策，结果挂在临时 AI 消息的 `additional_kwargs["decision"]` 上，由 `tool_dispatcher_node` 解析并填充对应 input 槽，再由 `main_dynamic_router` 据"哪个 input 槽非空"路由到对应 wrapper 节点。
-- **子图 1 RAG**：三路混合检索（向量/`index.json` 索引/本地 Markdown grep）→ 重合行区间去重合并 → 输出带 `[文件名](start_line~end_line)` 的 `citations_output`；得分全低于阈值时输出 `gap_topic`。
-- **子图 2 Deep Research**：收到 `gap_topic` → `interrupt()` 挂起等用户批准（HITL）→ 获批后多轮 web 爬取 → 写入新 Markdown → 触发 Index Agent 重建 `index.json`。
-- **子图 3 Memory**：静默提取用户画像/弱点，持久化到 Store。
-- **Index Agent（后台 agent，不在主图流程中）**：定位为**数据导入触发的后台维护 agent**，与主图/对话流程**完全解耦**。仅在「通过非对话接口（如数据导入 API）导入新 Markdown」时自动唤醒，扫描文件、维护 `index.json` + Chroma 向量灌入。**主图不调用、不应调用 Index Agent**——主图只读 `index.json` 与 Chroma（通过 `rag_agent` 的检索工具），不触发索引重建。前端未实现前，提供一个**主动唤醒命令**（CLI / 脚本入口）手动激活它处理一批文件。Deep Research 写入新 Markdown 后重建索引，也走该命令/导入接口，而非主图节点。
-- **存储层**：`SqliteSaver`（checkpoints，`sqlite_checkpoints.db`，支持 `thread_id` 状态回放/故障重放）、本地 SQLite `Store`（长期记忆）、本地 Chroma（向量库，`domain_kb` / `interview_kb` 两个 collection）。
+主图（`src/agent/graph.py`）+ 4 个子 agent，均为 LangGraph StateGraph：`chat_node`（`bind_tools(ALL_TOOLS)`）经 `route_after_chat`（查 `tool_calls`）分发到 `rag_agent` / `resume_agent` / `research_agent` wrapper 节点，或 `tools_node` / `save_memory`。子图通过标准 `ToolMessage` 与主图通信，`MainState` 不预留子图 I/O 槽位（简化版）。`index_agent` 是后台 agent（不进主图）。各子图目录自包含（`graph.py` / `state.py` / `tools/`）。实现细节见 [docs/progress.md](docs/progress.md) 与 `src/` 代码。
 
-### 增量开发路线（设计文档第 6 节）
-Phase 1 混合 RAG 子图 → Phase 2 动态主图总线 → Phase 3 本地 SQLite 断点 → Phase 4 FastAPI 端到端（`/v1/chat`，SSE 流式）→ Phase 5 自主深研 HITL。每个 Phase 用 LangGraph Studio 可视化验证节点轨迹与中间状态。
+> **已知技术债（R0–R3 重构将解决）**：① 持久化路径散落（`state_db.sqlite` / `sqlite_store.db` / `sqlite_checkpoints.db` 三套，Studio 与 server 不同库）；② 模型名 `"deepseek-v4-flash"` 硬编码于 5+ 处；③ 主图无 registry，新增子 agent 需手改 `ALL_TOOLS`/`route_after_chat`/`path_map`/`add_node` 四处；④ `research_agent` wrapper 用惰性 `_get_research_graph()`，Studio 无法展开其子图（其余两 agent 为顶层 import）；⑤ 子图互依（rag→index_agent 内部、resume→主图 wrapper、research→index_agent 图）；⑥ import 风格混用 `src.client` 与裸包名。
 
 ## 开发约定
 
 - **行级引用是硬约束**：知识库切片必须在 metadata 保留 `start_line` / `end_line`，检索结果必须附带文件名+行区间——这是设计文档反复强调的核心需求，实现 RAG 时不可省略。
 - **LangGraph Studio 是首要调试工具**：`langgraph dev` 启动后可编辑历史 state、从任意节点重跑、查看子图内部变量。改图后热重载。
-- **新增子智能体时**：按设计文档的注册模式，走 `AgentRegistry` + 预留 input/output 槽位 + wrapper 节点，而非直接在主图里堆节点——保证状态隔离与可拔插。
+- **新增子智能体时**：遵循当前 wrapper 模式——在 `src/agent/tools/<name>.py` 写 `@tool` 工具 + 异步 wrapper 节点（函数体**模块顶层 import 已编译子图实例并裸名引用**），把它加入 `ALL_TOOLS`、`route_after_chat` 路由、`path_map`、`build_main_graph` 的 `add_node`/`add_edge`。**Studio 子图发现硬约束**：wrapper 必须"模块顶层 `from <agent>.graph import graph as X` + 函数体 `await X.ainvoke(...)`"——惰性 getter / 体内 import / 体内编译均无法被 `find_subgraph_pregel` 静态发现，Studio 将展不开子图内部节点（详见 `prototypes/phase7_registry_studio_probe.py` 与 LangGraph 源码 `pregel/_utils.py`）。R1 引入 registry 后，新增子 agent 降至"一模块 + 清单一行"。
 - **子智能体目录结构（硬性约定）**：每个子图 / 子 agent 的相关逻辑**全部集中到 `src/` 下独属文件夹**，不散落到主图或公共模块。例如 `rag_agent` 全部放 `src/rag_agent/`。文件夹内大致结构：
   - `graph.py` — 该智能体的图逻辑（节点、边、编译）。
   - `state.py` — 该智能体需要的状态及数据结构定义（TypedDict / Pydantic 等）。
   - `tools/` — 该智能体可使用的工具（按需分子模块）。
   - 其余辅助模块（如 `prompts.py`、`retrieval.py`）按需新增，但务必**自包含**在本文件夹内。
-  - 主图 `src/agent/graph.py` + `src/agent/registry.py` 仅通过 wrapper 节点 + 槽位引用子图，不直接实现子图内部逻辑。
-  - 命名：文件夹名即子 agent 名（`rag_agent` / `resume_agent` / `research_agent` / `memory_agent` 等），与 `AgentRegistry` 注册名一致。
-  - **Index Agent 是例外**：它不进 `AgentRegistry`、不在主图流程中，是后台 agent（详见下文「Index Agent 定位」），但仍遵循本目录结构约定，放 `src/index_agent/`，外加一个可被导入接口 / CLI 唤醒的入口。
-- **Index Agent 定位（后台 agent，不进主图）**：职责仅是「在导入新 Markdown 时整理更新 `index.json` + Chroma 向量灌入」。触发方式：① 前端就绪后，由**非对话的数据导入接口**自动唤醒；② 前端未实现时，提供**主动唤醒命令**（CLI / 脚本入口）手动激活处理一批文件。**主图不调用、不应调用 Index Agent**——主图只读 `index.json` 与 Chroma（经 `rag_agent` 检索工具）。Deep Research 写新 Markdown 后重建索引也走导入接口 / 命令，而非主图节点。
+  - 主图 `src/agent/graph.py` 仅通过 wrapper 节点 + `ToolMessage` 引用子图，不直接实现子图内部逻辑。
+  - 命名：文件夹名即子 agent 名（`rag_agent` / `resume_agent` / `research_agent` / `index_agent`），与 `langgraph.json` 注册名一致。
+  - **Index Agent 是例外**：它不进主图流程，是后台 agent（详见下文「Index Agent 定位」），但仍遵循本目录结构约定，放 `src/index_agent/`，外加一个可被导入接口 / CLI 唤醒的入口。
+- **Index Agent 定位（后台 agent，不进主图）**：职责仅是「在导入新 Markdown 时整理更新 `data/index.md` + Chroma 向量灌入」。触发方式：① 前端就绪后，由**非对话的数据导入接口**自动唤醒；② 前端未实现时，提供**主动唤醒命令**（CLI / 脚本入口）手动激活处理一批文件。**主图不应直接调用 Index Agent**——主图只读 `data/index.md` 与 Chroma（经 `rag_agent` 检索工具）。注：`research_agent` 的 `index_rebuild_node` 现直接 `ainvoke` index_agent 图（跨子图调用），属已知技术债，待重构时改走导入接口/命令。
 - Lint 配置见 [pyproject.toml](pyproject.toml) `[tool.ruff]`：启用 E/F/I/D/UP，google pydocstyle 约定，`tests/*` 放宽 D/UP。mypy 跑 `--strict`。
 - `.env` 仅放 `LANGSMITH_PROJECT` 与各 provider API key（见 `.env.example`）；不要把密钥写进代码。
 
@@ -78,9 +68,9 @@ Phase 1 混合 RAG 子图 → Phase 2 动态主图总线 → Phase 3 本地 SQLi
 ## 技术选型决策（已与用户拍板）
 
 - **LLM provider**：OpenAI 兼容端点（`langchain-openai` 的 `ChatOpenAI`，`base_url` / `model` / `api_key` 走 `.env` 配置）。可对接 OpenAI / DeepSeek / Qwen / 智谱等任意 OpenAI 兼容服务。所有 `chat_node`、Memory、Deep Research 节点统一用此。
-- **Embedding**：本地 `sentence-transformers`（中文语料优先 `bge-small-zh` / `bge-m3` 一类），离线推理、无 API 费用。Chroma 的 `embedding_function` 指向它。
+- **Embedding**：SiliconFlow API（`BAAI/bge-large-zh-v1.5`，1024 维，OpenAI 兼容端点，`SILICONFLOW_*` env 配置），在线推理。Chroma 的 `embedding_function` 指向 `src/index_agent/tools/vectorstore.py:SiliconFlowEmbeddingFunction`（单例缓存）。Phase 1 曾用本地 `sentence-transformers`，Phase 2 起改为 SiliconFlow。
 - **Grep 检索策略**：混合 —— 默认「向量命中文件后定向 grep」，当向量得分全部偏低时兜底触发「全目录全量 grep」作为召回补充。
-- **简历优化架构（重要调整，偏离设计文档原描述）**：简历优化逻辑**独立为一个子图 / 子 agent（`resume_agent`）**，不散落在主图 `chat_node` / Memory。主图 router 识别"优化简历"意图后激活该子 agent；草稿暂存 / 回退状态持久化到 Store（按 `user_id` 存版本栈），前端在激活时进入草稿维护态。**复杂逻辑全部下沉到子图，主图只做路由激活。** `MainState` 预留 `resume_subgraph_input` / `resume_subgraph_output` 槽位。
+- **简历优化架构（偏离设计文档原描述，已实现）**：简历优化独立为子图 `resume_agent`（计划-确认-执行循环），不散落在主图 `chat_node` / Memory。主图 `route_after_chat` 识别"优化简历"意图后激活该子 agent。草稿维护在 `ResumeState.current_draft` / `last_draft`（内存态 + checkpointer 持久化），CRUD 工具通过 `ToolRuntime` 读改 state、返回 `Command(update=...)`。**未持久化到 Store**（设计文档原提的"按 user_id 版本栈"未实现，属已知技术债）。主图与子图通过 `ToolMessage` 通信，无预留槽位。
 
 ## 用户的要求（协作约束，硬性）
 
