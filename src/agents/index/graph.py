@@ -22,9 +22,6 @@ from agents.index.tools.llm_index import build_llm, update_index_via_llm
 from agents.index.tools.vectorstore import make_persistent_client, upsert_chunks
 from kernel.paths import CHROMA_PATH, INDEX_MD_PATH, MARKDOWN_DIR
 
-_llm = build_llm()
-"""模块级 LLM 实例（避免每次节点调用重建，复用连接）。"""
-
 
 def _resolve_target_files(target_files: list[str]) -> list[Path]:
     """把文件名列表解析为存在的 markdown 文件 Path 列表（跳过不存在者）。
@@ -101,7 +98,7 @@ async def llm_index_node(state: IndexAgentState) -> dict[str, Any]:
     """
     existing: list[IndexRow] = state.get("existing_rows", [])
     chunks = state.get("chunks", [])
-    update = await update_index_via_llm(_llm, existing, chunks)
+    update = await update_index_via_llm(build_llm(), existing, chunks)
     return {"index_update": update}
 
 

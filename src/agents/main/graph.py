@@ -62,17 +62,8 @@ def _build_system_prompt() -> str:
 # --------------------------------------------------------------------------- #
 
 
-# chat_node 使用的模型（bind_tools 后），由 _init_chat 初始化
-_chat_model: Any = None
-
-
 def _init_chat(store: BaseStore) -> None:
-    """初始化 ``chat_node`` 依赖的全局状态。
-
-    在 ``build_main_graph`` 中调用，Store 实例在此注入。
-    """
-    global _chat_model
-    _chat_model = get_chat_model(CHAT_MODEL, tools=ALL_TOOLS)
+    """初始化 ``chat_node`` 使用的共享 Store。"""
     set_store(store)
 
 
@@ -81,9 +72,6 @@ def chat_node(state: MainState) -> dict[str, Any]:
 
     每次调用时从 ``agent.memory`` 读取当前用户记忆，拼接到 system prompt 尾部。
     """
-    if _chat_model is None:
-        raise RuntimeError("chat_node 未初始化——请确保 _init_chat() 已被调用")
-
     user_id = state.get("user_id", "default")
     dlog(
         "main",
@@ -105,7 +93,8 @@ def chat_node(state: MainState) -> dict[str, Any]:
             ("placeholder", "{messages}"),
         ]
     )
-    chain = prompt | _chat_model
+    chat_model = get_chat_model(CHAT_MODEL, tools=ALL_TOOLS)
+    chain = prompt | chat_model
     response = chain.invoke({"messages": state.get("messages", [])})
     tcs = getattr(response, "tool_calls", []) or []
     if tcs:

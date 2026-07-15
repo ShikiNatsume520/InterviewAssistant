@@ -1,0 +1,68 @@
+export type IdentityKind = "guest" | "developer";
+export type AgentSource = "user" | "main" | "resume" | "research" | "system";
+
+export interface Identity {
+  principal_id: string;
+  kind: IdentityKind;
+}
+
+export interface ThreadRecord {
+  id: string;
+  title: string;
+  status: "idle" | "running" | "interrupted";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProductEvent {
+  eventId: string;
+  threadId: string;
+  sequence: number;
+  taskId: string | null;
+  type: string;
+  source: AgentSource;
+  occurredAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface EventPage {
+  events: ProductEvent[];
+  hasMore: boolean;
+}
+
+export interface ModelConfig {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+}
+
+export type StreamFrame =
+  | { kind: "event"; event: ProductEvent }
+  | {
+      kind: "delta";
+      messageId: string;
+      source: AgentSource;
+      text: string;
+    };
+
+export interface ApiErrorBody {
+  error?: {
+    code?: string;
+    message?: string;
+    retryable?: boolean;
+  };
+}
+
+export class ApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+  readonly retryable: boolean;
+
+  constructor(message: string, code: string, status: number, retryable = false) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.status = status;
+    this.retryable = retryable;
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "frontend-phase0-sse",
+  "version": "1.0.0",
+  "description": "Phase 0 probe for React POST SSE dedupe and recovery",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "probe:compile": "tsc -p tsconfig.probe.json",
+    "probe:server": "node server.mjs",
+    "probe:client": "node probe-client.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4"
+  }
+}

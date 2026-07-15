@@ -1,0 +1,401 @@
+"""游客/开发人员身份、Session、Thread 与活动任务持久化。"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import secrets
+import sqlite3
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Literal
+
+PrincipalKind = Literal["guest", "developer"]
+ThreadStatus = Literal["idle", "running", "interrupted"]
+
+GUEST_SESSION_TTL = timedelta(days=30)
+DEVELOPER_SESSION_TTL = timedelta(hours=12)
+
+
+class IdentityError(Exception):
+    """Session 或开发凭证无效。"""
+
+
+class AccessDenied(Exception):
+    """资源不存在或不属于当前身份。"""
+
+
+class ActiveTaskConflict(Exception):
+    """当前身份已有活动任务，或目标 Thread 正在执行。"""
+
+
+@dataclass(frozen=True)
+class Principal:
+    """服务端解析出的身份上下文。"""
+
+    id: str
+    kind: PrincipalKind
+
+
+@dataclass(frozen=True)
+class AuthSession:
+    """已认证 Session；token 仅用于刷新同一个 HttpOnly Cookie。"""
+
+    principal: Principal
+    token: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class ThreadRecord:
+    """会话元数据。"""
+
+    id: str
+    title: str
+    status: ThreadStatus
+    created_at: str
+    updated_at: str
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _iso(value: datetime) -> str:
+    return value.isoformat()
+
+
+def _parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _new_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+class IdentityThreadStore:
+    """SQLite 身份与 Thread 存储，所有资源查询强制 principal 边界。"""
+
+    def __init__(self, db_path: Path | str) -> None:
+        """打开数据库并按需初始化阶段 1 表结构。"""
+        path = Path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(
+            str(path), check_same_thread=False, isolation_level=None
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+        self._setup()
+        self._recover_interrupted_tasks()
+
+    def close(self) -> None:
+        """关闭 SQLite 连接。"""
+        with self._lock:
+            self._conn.close()
+
+    def _setup(self) -> None:
+        with self._lock:
+            self._conn.executescript(
+                """
+                PRAGMA foreign_keys = ON;
+                PRAGMA journal_mode = WAL;
+
+                CREATE TABLE IF NOT EXISTS principals (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK (kind IN ('guest', 'developer')),
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    principal_id TEXT NOT NULL
+                        REFERENCES principals(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS threads (
+                    id TEXT PRIMARY KEY,
+                    principal_id TEXT NOT NULL
+                        REFERENCES principals(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('idle', 'running', 'interrupted')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_threads_principal_updated
+                ON threads(principal_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS active_tasks (
+                    principal_id TEXT PRIMARY KEY
+                        REFERENCES principals(id) ON DELETE CASCADE,
+                    thread_id TEXT NOT NULL
+                        REFERENCES threads(id) ON DELETE CASCADE,
+                    task_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL
+                );
+                """
+            )
+
+    def _recover_interrupted_tasks(self) -> None:
+        """启动时释放进程异常退出遗留的锁，并保留可恢复状态。"""
+        now = _iso(_now())
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE threads SET status = 'interrupted', updated_at = ?
+                WHERE id IN (SELECT thread_id FROM active_tasks)
+                """,
+                (now,),
+            )
+            self._conn.execute("DELETE FROM active_tasks")
+
+    def _create_principal(self, kind: PrincipalKind, principal_id: str) -> Principal:
+        principal = Principal(id=principal_id, kind=kind)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO principals(id, kind, created_at) VALUES (?, ?, ?)",
+                (principal.id, principal.kind, _iso(_now())),
+            )
+        return principal
+
+    def _issue_session(self, principal: Principal) -> AuthSession:
+        token = _new_token()
+        now = _now()
+        ttl = (
+            DEVELOPER_SESSION_TTL
+            if principal.kind == "developer"
+            else GUEST_SESSION_TTL
+        )
+        expires_at = now + ttl
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO sessions(
+                    token_hash, principal_id, created_at, expires_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    _token_hash(token),
+                    principal.id,
+                    _iso(now),
+                    _iso(expires_at),
+                    _iso(now),
+                ),
+            )
+        return AuthSession(principal=principal, token=token, expires_at=expires_at)
+
+    def create_guest_session(self) -> AuthSession:
+        """创建新游客身份并签发 30 天 Session。"""
+        principal = self._create_principal("guest", str(uuid.uuid4()))
+        return self._issue_session(principal)
+
+    def create_developer_session(
+        self,
+        supplied_token: str,
+        *,
+        enabled: bool,
+        expected_token: str | None,
+    ) -> AuthSession:
+        """验证开发模式与访问凭证，签发稳定开发 principal 的 Session。"""
+        if not enabled or not expected_token:
+            raise IdentityError("developer mode disabled")
+        if not hmac.compare_digest(supplied_token, expected_token):
+            raise IdentityError("invalid developer credential")
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM principals WHERE kind = 'developer' LIMIT 1"
+            ).fetchone()
+        principal = (
+            Principal(id=str(row["id"]), kind="developer")
+            if row is not None
+            else self._create_principal("developer", "developer-local")
+        )
+        return self._issue_session(principal)
+
+    def authenticate(self, token: str) -> AuthSession:
+        """认证并滚动续期当前 Session。"""
+        digest = _token_hash(token)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT p.id, p.kind, s.expires_at
+                FROM sessions s JOIN principals p ON p.id = s.principal_id
+                WHERE s.token_hash = ?
+                """,
+                (digest,),
+            ).fetchone()
+        if row is None:
+            raise IdentityError("invalid session")
+        now = _now()
+        if _parse_iso(str(row["expires_at"])) <= now:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    "DELETE FROM sessions WHERE token_hash = ?", (digest,)
+                )
+            raise IdentityError("expired session")
+        kind: PrincipalKind = row["kind"]
+        ttl = DEVELOPER_SESSION_TTL if kind == "developer" else GUEST_SESSION_TTL
+        expires_at = now + ttl
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE sessions SET expires_at = ?, last_seen_at = ?
+                WHERE token_hash = ?
+                """,
+                (_iso(expires_at), _iso(now), digest),
+            )
+        return AuthSession(
+            principal=Principal(id=str(row["id"]), kind=kind),
+            token=token,
+            expires_at=expires_at,
+        )
+
+    def create_thread(self, principal: Principal, title: str) -> ThreadRecord:
+        """创建归属当前 principal 的 Thread。"""
+        thread_id = str(uuid.uuid4())
+        now = _iso(_now())
+        clean_title = title.strip() or "新会话"
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO threads(
+                    id, principal_id, title, status, created_at, updated_at
+                ) VALUES (?, ?, ?, 'idle', ?, ?)
+                """,
+                (thread_id, principal.id, clean_title, now, now),
+            )
+        return ThreadRecord(thread_id, clean_title, "idle", now, now)
+
+    def list_threads(self, principal: Principal) -> list[ThreadRecord]:
+        """列出当前 principal 的全部 Thread。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, title, status, created_at, updated_at
+                FROM threads WHERE principal_id = ?
+                ORDER BY updated_at DESC, rowid DESC
+                """,
+                (principal.id,),
+            ).fetchall()
+        return [self._thread_from_row(row) for row in rows]
+
+    def require_thread(self, principal: Principal, thread_id: str) -> ThreadRecord:
+        """读取 Thread；不存在或越权均抛同一种异常。"""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, principal_id, title, status, created_at, updated_at
+                FROM threads WHERE id = ?
+                """,
+                (thread_id,),
+            ).fetchone()
+        if row is None or not hmac.compare_digest(
+            str(row["principal_id"]), principal.id
+        ):
+            raise AccessDenied("thread not found")
+        return self._thread_from_row(row)
+
+    def rename_thread(
+        self, principal: Principal, thread_id: str, title: str
+    ) -> ThreadRecord:
+        """重命名当前 principal 的 Thread。"""
+        self.require_thread(principal, thread_id)
+        clean_title = title.strip()
+        if not clean_title:
+            raise ValueError("title cannot be empty")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE threads SET title = ?, updated_at = ? WHERE id = ?",
+                (clean_title, _iso(_now()), thread_id),
+            )
+        return self.require_thread(principal, thread_id)
+
+    def delete_thread(self, principal: Principal, thread_id: str) -> None:
+        """删除无活动任务的 Thread 元数据。"""
+        with self._lock:
+            self.ensure_thread_deletable(principal, thread_id)
+            self._conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
+
+    def ensure_thread_deletable(self, principal: Principal, thread_id: str) -> None:
+        """确认 Thread 归属正确且当前没有活动任务。"""
+        self.require_thread(principal, thread_id)
+        with self._lock:
+            active = self._conn.execute(
+                "SELECT 1 FROM active_tasks WHERE thread_id = ?", (thread_id,)
+            ).fetchone()
+        if active is not None:
+            raise ActiveTaskConflict("thread has an active task")
+
+    def acquire_task(self, principal: Principal, thread_id: str, task_id: str) -> None:
+        """获取 principal 级单活动任务锁，并将 Thread 标为 running。"""
+        self.require_thread(principal, thread_id)
+        try:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO active_tasks(
+                        principal_id, thread_id, task_id, started_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (principal.id, thread_id, task_id, _iso(_now())),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE threads SET status = 'running', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (_iso(_now()), thread_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ActiveTaskConflict("principal already has an active task") from exc
+
+    def release_task(
+        self,
+        principal: Principal,
+        task_id: str,
+        *,
+        status: Literal["idle", "interrupted"],
+    ) -> None:
+        """释放匹配的活动任务锁，并更新 Thread 状态。"""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT thread_id FROM active_tasks
+                WHERE principal_id = ? AND task_id = ?
+                """,
+                (principal.id, task_id),
+            ).fetchone()
+        if row is None:
+            return
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM active_tasks WHERE principal_id = ? AND task_id = ?",
+                (principal.id, task_id),
+            )
+            self._conn.execute(
+                "UPDATE threads SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _iso(_now()), str(row["thread_id"])),
+            )
+
+    @staticmethod
+    def _thread_from_row(row: sqlite3.Row) -> ThreadRecord:
+        status: ThreadStatus = row["status"]
+        return ThreadRecord(
+            id=str(row["id"]),
+            title=str(row["title"]),
+            status=status,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
