@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from agents.rag.state import Citation, RawResult
 from kernel.embedder import COLLECTION_NAME
+from kernel.logging import dlog
 from kernel.paths import CHROMA_PATH, MARKDOWN_DIR
 from kernel.paths import INDEX_MD_PATH as INDEX_MD
 
@@ -26,10 +27,7 @@ if TYPE_CHECKING:
 # 阈值常量
 # --------------------------------------------------------------------------- #
 SCORE_LOW_THRESHOLD = 0.55
-"""余弦空间下：低于此值的向量得分视为噪声。"""
-
-GAP_RATIO_THRESHOLD = 1.15
-"""分差比阈值：top_score / avg(all_scores) 低于此值 → 低置信度，触发兜底。"""
+"""余弦空间下：低于此值的向量得分视为噪声（score 过滤阈值）。"""
 
 VECTOR_N_RESULTS = 8
 """向量检索 top-k 数（知识库仅 2 个文件时设为 8 足以覆盖全库）。"""
@@ -111,25 +109,40 @@ def _parse_index(text: str) -> list[dict[str, Any]]:
 def _grep_file(path: Path, terms: list[str]) -> list[RawResult]:
     """在单文件内逐行匹配任一检索词，返回合并行区间后的结果。
 
+    score 为词覆盖率：区间内命中的独立词数 / 检索词总数，与向量 score
+    同值域 (0,1]。单词 query 命中即 1.0；多词 query 命中越多词的区间
+    得分越高，从而有区分度。
+
     Args:
         path: 待检索的 markdown 文件 Path。
         terms: 检索词列表（逐词 OR 匹配）。
 
     Returns:
-        该文件的命中区间列表（含内容），grep 命中 score=1.0。
+        该文件的命中区间列表（含内容），score 为词覆盖率。
     """
     if not terms:
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
     pats = [re.compile(re.escape(t), re.IGNORECASE) for t in terms]
+    # 逐行匹配，记录命中行号与该行命中的词索引集合
     hit_lines: list[int] = []
+    line_term_sets: list[set[int]] = []
     for i, ln in enumerate(lines, 1):
-        if any(p.search(ln) for p in pats):
+        hit_idx = {j for j, p in enumerate(pats) if p.search(ln)}
+        if hit_idx:
             hit_lines.append(i)
+            line_term_sets.append(hit_idx)
     if not hit_lines:
         return []
+    n_terms = len(terms)
     out: list[RawResult] = []
+    cursor = 0
     for s, e in _merge_ranges([(h, h) for h in hit_lines]):
+        # 收集该区间内所有命中行的词索引并集（hit_lines 升序、区间按序覆盖）
+        term_union: set[int] = set()
+        while cursor < len(hit_lines) and hit_lines[cursor] <= e:
+            term_union |= line_term_sets[cursor]
+            cursor += 1
         out.append(
             RawResult(
                 file_path=path.name,
@@ -137,10 +150,18 @@ def _grep_file(path: Path, terms: list[str]) -> list[RawResult]:
                 end_line=e,
                 heading="",
                 content="\n".join(lines[s - 1 : e]),
-                score=1.0,
+                score=len(term_union) / n_terms,
                 source="grep",
             )
         )
+    dlog(
+        "rag.retrieval",
+        "_grep_file",
+        f"{path.name} grep 命中",
+        terms=terms,
+        hit_lines_n=len(hit_lines),
+        ranges_n=len(out),
+    )
     return out
 
 
@@ -158,6 +179,7 @@ def keyword_retrieve(search_query: str) -> list[RawResult]:
     """
     terms = _extract_terms(search_query)
     rows = _parse_index(INDEX_MD.read_text(encoding="utf-8"))
+    dlog("rag.retrieval", "keyword_retrieve", "进入", query=search_query, terms=terms)
 
     candidate_files: list[str] = []
     for row in rows:
@@ -170,12 +192,26 @@ def keyword_retrieve(search_query: str) -> list[RawResult]:
         targets = [
             MARKDOWN_DIR / f for f in candidate_files if (MARKDOWN_DIR / f).exists()
         ]
+        dlog(
+            "rag.retrieval",
+            "keyword_retrieve",
+            "定向 grep（index.md 候选）",
+            candidates_n=len(candidate_files),
+            targets_n=len(targets),
+        )
     else:
         targets = sorted(MARKDOWN_DIR.glob("*.md"))
+        dlog(
+            "rag.retrieval",
+            "keyword_retrieve",
+            "无候选 → 全目录 grep",
+            targets_n=len(targets),
+        )
 
     results: list[RawResult] = []
     for fp in targets:
         results.extend(_grep_file(fp, terms))
+    dlog("rag.retrieval", "keyword_retrieve", "完成", results_n=len(results))
     return results
 
 
@@ -235,25 +271,44 @@ def _compute_confidence(
     return top_score, avg_score, ratio
 
 
-def semantic_retrieve(search_query: str) -> list[RawResult]:
-    """Semantic 管道：向量检索 → 标题节扩展 → 分差比置信度 → 兜底全目录 grep。
+_chroma_col: Any = None
+"""Chroma collection 单例（懒加载，避免每次 retrieve new PersistentClient 触发
+Rust backend 初始化竞态——首次 new 时 RustBindingsAPI.bindings 偶发未创建，
+stop() ``del self.bindings`` 抛 AttributeError）。"""
 
-    返回值可为空 → aggregate 判 gap。
+
+def _get_chroma_collection() -> Any:
+    """获取（惰性创建并缓存的）Chroma collection 单例。
+
+    单例化后只在首次检索 new 一次 PersistentClient；首次若失败（单例仍 None），
+    下次重试时 Rust 扩展已进程级加载，初始化稳定成功并缓存复用——故"刷新后好了"。
+    """
+    global _chroma_col
+    if _chroma_col is None:
+        import chromadb
+
+        from kernel.embedder import get_embed_fn
+
+        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+        _chroma_col = client.get_or_create_collection(
+            COLLECTION_NAME, embedding_function=get_embed_fn()
+        )
+    return _chroma_col
+
+
+def semantic_retrieve(search_query: str) -> list[RawResult]:
+    """Semantic 管道：向量检索 → 标题节扩展 → score 阈值过滤。
+
+    按 ``SCORE_LOW_THRESHOLD`` 过滤召回结果；过滤后为空则由
+    ``aggregate_results`` 判 gap。返回值可为空。
 
     Args:
         search_query: 检索词。
 
     Returns:
-        有效检索结果（已通过置信度验证），或空列表（gap 场景）。
+        过滤后的检索结果（score ≥ 阈值），或空列表（gap 场景）。
     """
-    import chromadb
-
-    from kernel.embedder import get_embed_fn
-
-    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-    col = client.get_or_create_collection(
-        COLLECTION_NAME, embedding_function=get_embed_fn()
-    )
+    col = _get_chroma_collection()
     res: QueryResult = col.query(query_texts=[search_query], n_results=VECTOR_N_RESULTS)
     ids = res["ids"]
     metas = res["metadatas"]
@@ -261,6 +316,13 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
     docs = res["documents"]
     assert (
         ids is not None and metas is not None and dists is not None and docs is not None
+    )
+    dlog(
+        "rag.retrieval",
+        "semantic_retrieve",
+        "向量召回",
+        query=search_query,
+        n_results=VECTOR_N_RESULTS,
     )
 
     recalled: list[RawResult] = []
@@ -280,22 +342,31 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
         )
 
     expanded = _expand_heading_sections(recalled)
-    _, _, ratio = _compute_confidence(expanded)
-    confident = ratio >= GAP_RATIO_THRESHOLD and any(
-        r["score"] >= SCORE_LOW_THRESHOLD for r in expanded
+    top_score, avg_score, ratio = _compute_confidence(expanded)
+    dlog(
+        "rag.retrieval",
+        "semantic_retrieve",
+        "召回明细",
+        recalled_n=len(recalled),
+        expanded_n=len(expanded),
+        top_score=round(top_score, 3),
+        avg_score=round(avg_score, 3),
+        ratio=round(ratio, 3),
+        top3=[(r["file_path"], round(r["score"], 3)) for r in recalled[:3]],
     )
-
-    if not confident:
-        for fp in sorted(MARKDOWN_DIR.glob("*.md")):
-            expanded.extend(_grep_file(fp, _extract_terms(search_query)))
-        _, _, ratio = _compute_confidence(expanded)
-        confident = ratio >= GAP_RATIO_THRESHOLD and any(
-            r["score"] >= SCORE_LOW_THRESHOLD for r in expanded
-        )
-
-    if not confident:
-        return []
-    return [r for r in expanded if r["score"] >= SCORE_LOW_THRESHOLD]
+    # 按 score 阈值过滤；gap 由 aggregate_results（raw 为空）判定。
+    # TODO(rag-agent): 未来用 LLM 智能汇总节点替代纯 score 阈值——由 LLM
+    # 判断哪些召回片段真正回答了 query、是否存在知识缺口（gap_topic），
+    # 而非依赖 SCORE_LOW_THRESHOLD 硬阈值（相关文档多且 score 接近时
+    # 易误判，原 confidence ratio 规则已因此废弃）。
+    filtered = [r for r in expanded if r["score"] >= SCORE_LOW_THRESHOLD]
+    dlog(
+        "rag.retrieval",
+        "semantic_retrieve",
+        "完成",
+        filtered_n=len(filtered),
+    )
+    return filtered
 
 
 # --------------------------------------------------------------------------- #
@@ -328,6 +399,13 @@ def retrieve_pipeline(search_query: str, search_type: str) -> list[RawResult]:
     Returns:
         管道产出的原始结果列表（未经 aggregate 处理）。
     """
+    dlog(
+        "rag.retrieval",
+        "retrieve_pipeline",
+        "分派",
+        search_type=search_type,
+        query=search_query,
+    )
     if search_type == "keyword":
         return keyword_retrieve(search_query)
     return semantic_retrieve(search_query)
@@ -346,6 +424,12 @@ def aggregate_results(
         (citations_output, gap_topic) 二元组。
     """
     if not raw_results:
+        dlog(
+            "rag.retrieval",
+            "aggregate_results",
+            "raw 为空 → gap",
+            gap_topic=search_query,
+        )
         return [], search_query
     ranked = sorted(raw_results, key=lambda r: r["score"], reverse=True)
     citations = [
@@ -354,7 +438,16 @@ def aggregate_results(
             start_line=r["start_line"],
             end_line=r["end_line"],
             content=r["content"],
+            score=r["score"],
         )
         for r in ranked
     ]
+    dlog(
+        "rag.retrieval",
+        "aggregate_results",
+        "完成",
+        raw_n=len(raw_results),
+        citations_n=len(citations),
+        top_score=round(citations[0]["score"], 3) if citations else 0.0,
+    )
     return citations, None

@@ -210,17 +210,127 @@ const sendBtn = $("send-btn");
 const statusEl = $("status");
 const threadInput = $("thread-id");
 
-// 初始化 thread_id
-function genThreadId() { return "web-" + Math.random().toString(36).slice(2, 10); }
-threadInput.value = genThreadId();
+// 统一 POST 日志（便于追踪 bug）
+function dbgPost(tag, url, body, extra) {
+  const ts = new Date().toLocaleTimeString();
+  const line = `[${ts}] [index POST] ${tag} ${url}` +
+    (body ? ` body=${JSON.stringify(body).slice(0, 200)}` : "") +
+    (extra ? ` ${extra}` : "");
+  console.log(line);
+  const el = $("debug-log");
+  if (el) { el.textContent += line + "\n"; el.scrollTop = el.scrollHeight; }
+}
+
+// 初始化 thread_id：从后端取当前会话（后端单会话简单实现）
+async function initThread() {
+  try {
+    dbgPost("initThread", "/v1/thread");
+    const resp = await fetch("/v1/thread");
+    dbgPost("initThread resp", "/v1/thread", null, `status=${resp.status}`);
+    if (resp.ok) {
+      const d = await resp.json();
+      if (d.thread_id) {
+        threadInput.value = d.thread_id;
+        await initFromState(d.thread_id);
+        return;
+      }
+    }
+  } catch (e) { dbg("init", "GET /v1/thread 失败:", e.message); }
+  // 兜底：空白主页
+  appendSystem("已就绪。可直接输入，或点击下方示例。");
+}
+initThread();
+
 $("new-thread").onclick = () => {
-  threadInput.value = genThreadId();
+  // 新建会话：清空前端状态，thread 留给后端下次 GET /v1/thread 决定
   chat.innerHTML = "";
   pendingInterrupt = null;
   curCitations = [];
   updateStatus();
-  appendSystem("已新建会话：" + threadInput.value);
+  appendSystem("已新建会话：请输入消息开始。");
 };
+
+// 从后端 state 快照恢复主页：渲染历史 messages + 按 pending interrupt 路由
+async function initFromState(tid) {
+  let st = null;
+  try {
+    dbgPost("initFromState", "/v1/state", null, `thread=${tid}`);
+    const resp = await fetch("/v1/state?thread_id=" + encodeURIComponent(tid));
+    dbgPost("initFromState resp", "/v1/state", null, `status=${resp.status}`);
+    if (resp.ok) st = await resp.json();
+    else {
+      const t = await resp.text();
+      console.error("GET /v1/state", resp.status, t);
+      appendSystem(`GET /v1/state ${resp.status}: ${t.slice(0, 150)}`);
+    }
+  } catch (e) { dbg("init", "GET /v1/state 失败:", e.message); }
+  if (!st) { appendSystem("已就绪。可直接输入。"); return; }
+
+  dbg("init", "state:", JSON.stringify({next: st.next, in_resume: st.in_resume, has_intr: !!st.pending_interrupt}));
+
+  // 在 resume 子图 → 跳 /resume
+  if (st.in_resume) {
+    appendSystem("检测到进行中的简历优化会话，跳转 /resume…");
+    location.href = "/resume?thread=" + encodeURIComponent(tid);
+    return;
+  }
+
+  // 渲染主图历史 messages
+  renderHistory(st.main.messages);
+
+  // pending interrupt → 就地渲染（plan_confirm 等）
+  if (st.pending_interrupt) {
+    renderInterrupt(st.pending_interrupt);
+  } else if (st.next && st.next.length > 0) {
+    // 卡在节点间（next 非空无 interrupt）→ POST /v1/checkpoint 续跑
+    appendSystem("恢复上次执行…");
+    postCheckpoint();
+  } else {
+    // next 空 = 已 END 或无 checkpoint
+    appendSystem("已就绪。可直接输入，或点击下方示例。");
+  }
+}
+
+function renderHistory(msgs) {
+  chat.innerHTML = "";
+  if (!msgs || !msgs.length) return;
+  for (const m of msgs) {
+    if (m.type === "human") appendUser(m.content);
+    else if (m.type === "ai") { const d = startAIMsg(); d.textContent = m.content; d.classList.remove("streaming"); }
+    else if (m.type === "system") appendSystem(m.content);
+    else if (m.type === "tool") appendToolMsg(m.content);
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// POST /v1/checkpoint：从最近 checkpoint 续跑（刷新恢复 / 卡节点间自动续跑）
+async function postCheckpoint() {
+  if (streaming) return;
+  const tid = threadInput.value.trim();
+  if (!tid) return;
+  const payload = { thread_id: tid };
+  dbgPost("postCheckpoint", "/v1/checkpoint", payload);
+  startAIMsg();
+  streaming = true;
+  updateStatus();
+  sendBtn.disabled = true;
+  try {
+    const resp = await fetch("/v1/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    dbgPost("postCheckpoint resp", "/v1/checkpoint", null, `status=${resp.status}`);
+    await consumeSSE(resp);
+  } catch (e) {
+    appendSystem("续跑失败: " + e.message);
+    if (currentAIMsg) { currentAIMsg.classList.remove("streaming"); currentAIMsg.remove(); currentAIMsg = null; }
+  } finally {
+    streaming = false;
+    sendBtn.disabled = false;
+    updateStatus();
+  }
+}
 
 // ────────────────────────────────────────────────────────────
 // UI 辅助
@@ -277,7 +387,9 @@ function renderCitations(cits) {
 }
 
 // ────────────────────────────────────────────────────────────
-// interrupt 渲染（plan_confirm / step_confirm）
+// interrupt 渲染
+//   resume_select→跳转 /resume | resume_approve|resume_hitl→兜底跳转
+//   outline_confirm→深研大纲确认 | connectivity_check→挂梯子继续 | plan_confirm→计划确认
 // ────────────────────────────────────────────────────────────
 function renderInterrupt(payload) {
   pendingInterrupt = payload;
@@ -287,7 +399,71 @@ function renderInterrupt(payload) {
   const box = document.createElement("div");
   box.className = "interrupt-box";
 
-  if (payload.phase === "plan_confirm") {
+  if (payload.phase === "resume_select") {
+    // resume_agent 激活：跳 /resume，带 intent 作右栏首条消息
+    const intent = payload.intent || "";
+    const tid = threadInput.value.trim();
+    appendSystem("进入简历优化，正在跳转到 /resume…");
+    location.href = "/resume?thread=" + encodeURIComponent(tid)
+      + "&intent=" + encodeURIComponent(intent);
+    return;
+  }
+
+  if (payload.phase === "resume_approve" || payload.phase === "resume_hitl") {
+    // 这两个中断应在 /resume 页处理；到主页说明状态不一致——兜底跳 /resume
+    const tid = threadInput.value.trim();
+    appendSystem("简历会话进行中，跳转 /resume…");
+    location.href = "/resume?thread=" + encodeURIComponent(tid);
+    return;
+  }
+
+  if (payload.phase === "outline_confirm") {
+    // research 深研大纲确认：approve / suggest / reject
+    const label = document.createElement("div");
+    label.className = "label"; label.textContent = "🔍 深研大纲确认";
+    box.appendChild(label);
+    const gap = document.createElement("div");
+    gap.textContent = "知识缺口：" + (payload.gap_topic || "");
+    box.appendChild(gap);
+    const ol = document.createElement("div");
+    ol.className = "diff-label"; ol.textContent = "检索词大纲：";
+    box.appendChild(ol);
+    const ul = document.createElement("ul");
+    ul.className = "plan-list";
+    (payload.outline || []).forEach((s, i) => {
+      const li = document.createElement("li");
+      li.textContent = `${i+1}. ${s}`;
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+    const ta = document.createElement("textarea");
+    ta.placeholder = "对大纲的建议（可选，填写后点建议会带建议重新规划）";
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const ok = mkBtn("批准", "approve", () => resumeWith("approve"));
+    const no = mkBtn("拒绝深研", "reject", () => resumeWith("reject"));
+    const sug = mkBtn("提交建议", "suggest", () => {
+      if (!ta.value.trim()) { appendSystem("请填写建议内容"); return; }
+      resumeWith({ decision: "suggest", suggestion: ta.value.trim() });
+    });
+    actions.append(ta, ok, no, sug);
+    box.appendChild(actions);
+
+  } else if (payload.phase === "connectivity_check") {
+    // research 连通性失败提示挂梯子：回复任意继续，3 次失败 abort
+    const label = document.createElement("div");
+    label.className = "label"; label.textContent = "⚠ 连通性检查";
+    box.appendChild(label);
+    const msg = document.createElement("div");
+    msg.textContent = payload.msg || "无法连接搜索服务，请挂梯子后继续";
+    box.appendChild(msg);
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const ok = mkBtn("已挂梯子，继续", "approve", () => resumeWith("continue"));
+    actions.append(ok);
+    box.appendChild(actions);
+
+  } else if (payload.phase === "plan_confirm") {
     box.innerHTML = `
       <div class="label">⚙ 计划确认</div>
       <div>请确认以下优化计划：</div>
@@ -310,32 +486,6 @@ function renderInterrupt(payload) {
     actions.append(ta, ok, sug);
     box.appendChild(actions);
 
-  } else if (payload.phase === "step_confirm") {
-    box.innerHTML = `
-      <div class="label">✎ 单步修改确认</div>
-      <div class="diff-label">修改前：</div>
-      <div class="draft-preview"></div>
-      <div class="diff-label">修改后：</div>
-      <div class="draft-preview"></div>
-    `;
-    const pres = box.querySelectorAll(".draft-preview");
-    pres[0].textContent = payload.before || "(空)";
-    pres[1].textContent = payload.after || "(空)";
-    $("resume-draft").textContent = payload.after || "(空)";
-
-    const ta = document.createElement("textarea");
-    ta.placeholder = "对该步骤的建议（可选）";
-    const actions = document.createElement("div");
-    actions.className = "actions";
-    const ok = mkBtn("批准", "approve", () => resumeWith("approve"));
-    const no = mkBtn("拒绝(回退)", "reject", () => resumeWith("reject"));
-    const sug = mkBtn("提交建议", "suggest", () => {
-      if (!ta.value.trim()) { appendSystem("请填写建议内容"); return; }
-      resumeWith({ decision: "suggest", suggestion: ta.value.trim() });
-    });
-    actions.append(ta, ok, no, sug);
-    box.appendChild(actions);
-
   } else {
     box.innerHTML = `<div class="label">⚠ 未知 interrupt</div>
       <pre>${JSON.stringify(payload, null, 2)}</pre>`;
@@ -353,16 +503,16 @@ function mkBtn(text, cls, onclick) {
 }
 
 // ────────────────────────────────────────────────────────────
-// 发送 / resume
+// 发送 / resume / 续跑
 // ────────────────────────────────────────────────────────────
 async function sendMessage(opts = {}) {
   const message = opts.message ?? input.value.trim();
   if (!message && !opts.resume) return;
   if (streaming) return;
 
-  const userId = $("user-id").value.trim() || "test_user";
+  const userId = $("user-id").value.trim() || "default";
   const threadId = threadInput.value.trim();
-  if (!threadId) { appendSystem("请填写 thread_id"); return; }
+  if (!threadId) { appendSystem("thread_id 为空，刷新页面重试"); return; }
 
   // 显示用户消息（resume 场景不显示，因为不是用户文字输入）
   if (!opts.resume && message) {
@@ -376,105 +526,23 @@ async function sendMessage(opts = {}) {
   updateStatus();
   sendBtn.disabled = true;
 
-  // 每次请求本地清空 interrupt 暂存，避免跨请求残留
-  let localInterrupt = null;
+  const body = { user_id: userId, thread_id: threadId, message: message || "" };
+  if (opts.resume !== undefined) body.resume_value = opts.resume;
 
-  const body = {
-    user_id: userId,
-    thread_id: threadId,
-    message: message || "(确认)",
-  };
-  if (opts.resume !== undefined) {
-    body.resume_value = opts.resume;
-  }
-
+  dbgPost("sendMessage", "/v1/chat", body);
   try {
     const resp = await fetch("/v1/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    dbgPost("sendMessage resp", "/v1/chat", null, `status=${resp.status}`);
     if (!resp.ok) {
       const txt = await resp.text();
       appendSystem(`HTTP ${resp.status}: ${txt.slice(0, 200)}`);
       return;
     }
-
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
-    let frameCount = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        dbg("sse", "stream done, 总帧数=", frameCount);
-        break;
-      }
-      const chunk = dec.decode(value, { stream: true });
-      dbg("sse", "raw chunk len=", chunk.length);
-      buf += chunk;
-
-      // SSE 按 \r\n\r\n 或 \n\n 分帧（sse-starlette 用 CRLF）
-      let idx;
-      const SEP = "\r\n\r\n";
-      while ((idx = buf.indexOf(SEP)) !== -1) {
-        const frame = buf.slice(0, idx);
-        buf = buf.slice(idx + SEP.length);
-        frameCount++;
-        const evt = parseSSE(frame);
-        dbg("sse", `帧#${frameCount} event=${evt.event} dataLen=${evt.data.length}`);
-        if (evt.data) dbg("sse", `  data预览=${evt.data.slice(0, 120)}`);
-
-        if (evt.event === "token") {
-          if (evt.data) {
-            currentAIMsg.textContent += evt.data;
-            chat.scrollTop = chat.scrollHeight;
-          }
-        } else if (evt.event === "interrupt") {
-          // 后端在流期间可能 yield 两次 interrupt（开头上下文 + 结尾状态），
-          // 取最后一次的 payload 渲染即可（结构相同）。
-          try {
-            localInterrupt = JSON.parse(evt.data);
-            dbg("interrupt", "已暂存 localInterrupt, phase=", localInterrupt?.interrupts?.[0]?.phase || localInterrupt?.phase);
-          } catch (e) {
-            dbg("interrupt", "payload 解析失败:", e.message);
-            appendSystem("interrupt payload 解析失败: " + e.message);
-          }
-        } else if (evt.event === "done") {
-          try {
-            const d = JSON.parse(evt.data);
-            dbg("done", "citations_n=", d.citations?.length || 0);
-            if (d.citations) renderCitations(d.citations);
-          } catch (e) { /* 忽略 */ }
-        }
-      }
-    }
-
-    // 流结束
-    dbg("flow", "流结束, localInterrupt=", localInterrupt ? "有" : "无");
-    currentAIMsg.classList.remove("streaming");
-    if (!currentAIMsg.textContent.trim()) {
-      currentAIMsg.remove();
-    }
-    currentAIMsg = null;
-
-    // 渲染 interrupt 或清理状态
-    if (localInterrupt) {
-      pendingInterrupt = localInterrupt;
-      // payload 形如 {"interrupts": [...]} 或直接是 interrupt 对象
-      let first = localInterrupt;
-      if (localInterrupt.interrupts) {
-        const arr = localInterrupt.interrupts;
-        first = Array.isArray(arr) && arr.length ? arr[0] : arr;
-      }
-      dbg("flow", "准备渲染 interrupt, phase=", first?.phase);
-      renderInterrupt(first);
-    } else {
-      dbg("flow", "无 interrupt, 清理 pending 状态");
-      pendingInterrupt = null;
-      $("info-pending").textContent = "无";
-    }
+    await consumeSSE(resp);
   } catch (e) {
     appendSystem("请求失败: " + e.message);
     if (currentAIMsg) { currentAIMsg.classList.remove("streaming"); currentAIMsg.remove(); currentAIMsg = null; }
@@ -482,6 +550,66 @@ async function sendMessage(opts = {}) {
     streaming = false;
     sendBtn.disabled = false;
     updateStatus();
+  }
+}
+
+// 消费 SSE 流：token(ns=main 追加 AI 气泡) / interrupt(渲染) / done(citations)
+async function consumeSSE(resp) {
+  if (!resp.body) return;
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let frameCount = 0;
+  let localInterrupt = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) { dbg("sse", "stream done, 总帧数=", frameCount); break; }
+    buf += dec.decode(value, { stream: true });
+
+    const SEP = "\r\n\r\n";
+    let idx;
+    while ((idx = buf.indexOf(SEP)) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + SEP.length);
+      frameCount++;
+      const evt = parseSSE(frame);
+      dbg("sse", `帧#${frameCount} event=${evt.event} dataLen=${evt.data.length}`);
+
+      if (evt.event === "token" && evt.data) {
+        // token data = {ns:"main"|"resume_agent", text}
+        try {
+          const tok = JSON.parse(evt.data);
+          if (tok.ns === "main" && tok.text) {
+            currentAIMsg.textContent += tok.text;
+            chat.scrollTop = chat.scrollHeight;
+          }
+        } catch (e) { dbg("sse", "token 解析失败:", e.message); }
+      } else if (evt.event === "interrupt") {
+        try {
+          const parsed = JSON.parse(evt.data);
+          // 后端 interrupt 事件 data = {"interrupts":[val,...]}，取 [0]；也可能是单个 val
+          localInterrupt = parsed.interrupts ? (Array.isArray(parsed.interrupts) && parsed.interrupts.length ? parsed.interrupts[0] : parsed.interrupts) : parsed;
+        } catch (e) { dbg("interrupt", "解析失败:", e.message); }
+      } else if (evt.event === "done" && evt.data) {
+        try {
+          const d = JSON.parse(evt.data);
+          if (d.citations) renderCitations(d.citations);
+        } catch (e) { /* 忽略 */ }
+      }
+    }
+  }
+
+  currentAIMsg.classList.remove("streaming");
+  if (!currentAIMsg.textContent.trim()) currentAIMsg.remove();
+  currentAIMsg = null;
+
+  if (localInterrupt) {
+    pendingInterrupt = localInterrupt;
+    renderInterrupt(localInterrupt);
+  } else {
+    pendingInterrupt = null;
+    $("info-pending").textContent = "无";
   }
 }
 
@@ -537,9 +665,6 @@ document.querySelectorAll(".examples .ex").forEach(el => {
   };
 });
 
-// 启动提示
-appendSystem("已就绪。可点击下方示例快速体验，或直接输入。");
-appendSystem("提示：简历优化会触发多次确认（计划确认 → 每步修改确认），请在弹出的确认框中选择批准/拒绝/建议。");
 dbg("init", "前端调试日志已启用");
 
 // 清空调试日志

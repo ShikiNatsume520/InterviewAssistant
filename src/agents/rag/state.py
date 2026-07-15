@@ -39,12 +39,15 @@ class Citation(TypedDict):
         start_line: 起始行号（1-based）。
         end_line: 结束行号（1-based）。
         content: 引用内容。
+        score: 归一化置信度，值域 (0, 1]。向量命中为 ``1/(1+dist)``，
+            grep 命中为词覆盖率（区间命中的独立词数 / 检索词总数）。
     """
 
     file_path: str
     start_line: int
     end_line: int
     content: str
+    score: float
 
 
 class RAGState(TypedDict, total=False):

@@ -4,15 +4,17 @@ Phase 6 的 ``ResearchState`` 是本子图的完整状态 schema，与 ``MainSta
 输入层由 ``gap_topic`` 构成，运行期维护连通性重试计数与累积的搜索笔记，输出靠
 ``approval_status`` / ``summary`` / ``new_file_name`` 反馈给主图。
 
-连通性重试机制（原型 phase6_subgraph_interrupt_probe.py 实测）:
-    ``interrupt()`` resume 后节点从头重跑, 重跑到 ``interrupt()`` 那行时不再阻塞,
-    返回 resume 值并继续执行其后代码。故 ``connect_attempts`` 累计写在 ``interrupt()``
-    **之后**的 return 里（POST-INTERRUPT）, 由条件边据 attempts 路由。
+连通性重试机制:
+    ``connect_attempts`` **在 interrupt 之前**累计写入（PRE-INTERRUPT），随 checkpoint
+    持久化。POST-INTERRUPT 写会丢（resume 读的是挂起前快照），导致 attempts 永远从
+    初始值开始 → 死循环无法 abort。故用 ``_pending_interrupt`` 传 interrupt payload，
+    ``connectivity_interrupt_node`` 单独负责挂起，``connectivity_check_node`` 只写累计 +
+    payload，不 interrupt。
 """
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 class ResearchNote(TypedDict):
@@ -41,8 +43,11 @@ class ResearchState(TypedDict, total=False):
         outline: ``outline_node`` 产出的 3-5 个检索词列表。
         outline_feedback: ``outline_confirm_node`` 在 suggest 场景回填的用户建议
             （供 outline_node 重新规划时参考）。
-        connect_attempts: 连通性检查失败累计次数（POST-INTERRUPT 写入, 3 次后 abort）。
+        connect_attempts: 连通性检查失败累计次数（PRE-INTERRUPT 写入, 3 次后 abort）。
         connectivity_ok: 最近一次连通性检查结果。
+        _pending_interrupt: connectivity_check 失败时传给 connectivity_interrupt_node
+            的挂起 payload（ConnectivityCheckPayload dict）。PRE-INTERRUPT 写, 保证
+            attempts 随 checkpoint 持久化, resume 后路由可读到正确累计值。
         research_notes: ``search_node`` 累积的笔记列表。
 
     输出层:
@@ -56,6 +61,7 @@ class ResearchState(TypedDict, total=False):
     outline_feedback: str
     connect_attempts: int
     connectivity_ok: bool
+    _pending_interrupt: dict[str, Any]
     research_notes: list[ResearchNote]
     new_file_name: str
     approval_status: Literal["approved", "rejected", "aborted"]

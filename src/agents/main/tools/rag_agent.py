@@ -20,10 +20,9 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
 from pydantic import Field
 
-from agents.main.state import MainState
 from agents.rag.graph import graph as rag_graph
 from agents.rag.state import Citation
-from kernel.logging import dlog, slog
+from kernel.logging import dlog
 
 
 @tool
@@ -60,12 +59,18 @@ def rag_agent(
     )
 
 
-async def rag_agent_node(state: MainState, config: RunnableConfig) -> dict[str, Any]:
+async def rag_agent_node(
+    state: dict[str, Any], config: RunnableConfig
+) -> dict[str, Any]:
     """异步 rag_agent 包装节点。
+
+    由 ``route_after_chat`` 经 ``Send("rag_agent", {"tool_call": tc})`` 调用，
+    从 Send arg 读取本节点负责的单个 tool_call（含 ``query`` / ``search_type``
+    / ``id``），调用 RAG 子图，返回 ``ToolMessage``（用 ``tool_call_id`` 构造）
+    与结构化 ``citations``。
 
     直接 ``import`` 模块级预编译的 RAG 子图实例（``rag_graph``，编译时不带
     checkpointer → 运行时自动继承父图 checkpointer），用 ``ainvoke`` 调用。
-
     子图作为模块级实例在函数体被直接引用，``find_subgraph_pregel`` 的 AST 闭包
     分析可发现它 → ``PregelNode.subgraphs`` 被填充 → Studio 可展开子图内部节点。
 
@@ -74,94 +79,65 @@ async def rag_agent_node(state: MainState, config: RunnableConfig) -> dict[str, 
     """
     # rag_graph 为模块级预编译实例（rag_agent.graph.graph），不传 checkpointer
     # → 运行时自动继承父图 checkpointer（None fallthrough 到 configurable）
-    dlog("rag", "rag_agent_node", "调用 RAG 子图（模块级实例，继承父图 checkpointer）")
-    slog("rag", "rag_agent_node", "进入节点")
+    dlog("rag", "rag_agent_node", "进入节点")
 
-    # ── 提取参数并调用 ──
-    messages = state.get("messages", [])
-    if not messages:
-        dlog("rag", "rag_agent_node", "无消息，返回空")
-        slog("rag", "rag_agent_node", "无消息，返回空")
-        return {"citations": []}
+    tc: dict[str, Any] = state.get("tool_call", {}) or {}
+    args = tc.get("args", {}) or {}
+    query = str(args.get("query", args.get("search_query", "")))
+    stype = str(args.get("search_type", "semantic"))
+    tool_call_id = str(tc.get("id", "rag_agent"))
 
-    last_msg = messages[-1]
-    tool_calls = getattr(last_msg, "tool_calls", [])
-    if not tool_calls:
-        dlog("rag", "rag_agent_node", "最后消息无 tool_call，返回空")
-        slog("rag", "rag_agent_node", "最后消息无 tool_call，返回空")
-        return {"citations": []}
+    dlog(
+        "rag",
+        "rag_agent_node",
+        "调用 RAG 子图",
+        query=query,
+        search_type=stype,
+        tool_call_id=tool_call_id,
+    )
 
-    tool_messages: list[ToolMessage] = []
-    all_citations: list[Citation] = []
-
-    for tc in tool_calls:
-        args = tc.get("args", {})
-        query = args.get("query", args.get("search_query", ""))
-        stype = args.get("search_type", "semantic")
+    # 异步调用子图（模块级实例，继承父图 checkpointer）
+    # 当前 RAG 子图无 interrupt，try/except 透传 GraphInterrupt 为预留
+    try:
+        result = await rag_graph.ainvoke(
+            {
+                "search_query": query,
+                "search_type": stype,
+            },
+            config,
+        )
+    except GraphInterrupt:
         dlog(
-            "rag",
-            "rag_agent_node",
-            "调用 RAG 子图",
-            query=query,
-            search_type=stype,
-            tool_call_id=tc.get("id"),
+            "rag", "rag_agent_node", "子图 interrupt，透传 GraphInterrupt（主图将挂起）"
         )
-        slog("rag", "rag_agent_node", "调用 RAG 子图", query=query, search_type=stype)
+        raise
 
-        # 异步调用子图（模块级实例，继承父图 checkpointer）
-        # 当前 RAG 子图无 interrupt，try/except 透传 GraphInterrupt 为预留
-        try:
-            result = await rag_graph.ainvoke(
-                {
-                    "search_query": query,
-                    "search_type": stype,
-                },
-                config,
+    citations: list[Citation] = result.get("citations_output", [])
+    gap_topic: str | None = result.get("gap_topic")
+    dlog(
+        "rag",
+        "rag_agent_node",
+        "RAG 子图返回",
+        citations_n=len(citations),
+        gap_topic=gap_topic,
+        files=[c.get("file_path") for c in citations],
+    )
+
+    if gap_topic:
+        content = f"未在知识库中找到「{gap_topic}」的相关内容。"
+    elif citations:
+        parts: list[str] = []
+        for i, c in enumerate(citations, 1):
+            parts.append(
+                f"[{i}] {c['file_path']} L{c['start_line']}-{c['end_line']} "
+                f"| 置信度 {c['score']:.2f}\n"
+                f"    {c['content']}"
             )
-        except GraphInterrupt:
-            dlog(
-                "rag",
-                "rag_agent_node",
-                "子图 interrupt，透传 GraphInterrupt（主图将挂起）",
-            )
-            slog("rag", "rag_agent_node", "子图 interrupt，透传 GraphInterrupt")
-            raise
-
-        citations: list[Citation] = result.get("citations_output", [])
-        gap_topic: str | None = result.get("gap_topic")
-        dlog(
-            "rag",
-            "rag_agent_node",
-            "RAG 子图返回",
-            citations_n=len(citations),
-            gap_topic=gap_topic,
-        )
-        slog(
-            "rag",
-            "rag_agent_node",
-            "RAG 子图返回",
-            citations_n=len(citations),
-            gap_topic=gap_topic,
-            files=[c.get("file_path") for c in citations],
-        )
-
-        if gap_topic:
-            content = f"未在知识库中找到「{gap_topic}」的相关内容。"
-        elif citations:
-            parts: list[str] = []
-            for i, c in enumerate(citations, 1):
-                parts.append(
-                    f"[{i}] {c['file_path']}(L{c['start_line']}~{c['end_line']})\n"
-                    f"    {c['content']}"
-                )
-            content = "\n\n".join(parts)
-        else:
-            content = "未检索到相关内容。"
-
-        tool_messages.append(ToolMessage(content=content, tool_call_id=tc["id"]))
-        all_citations.extend(citations)
+        content = "\n\n".join(parts)
+    else:
+        content = "未检索到相关内容。"
 
     return {
-        "messages": tool_messages,
-        "citations": all_citations,
+        "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)],
+        "citations": citations,
     }
