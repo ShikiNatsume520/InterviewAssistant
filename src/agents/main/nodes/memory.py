@@ -35,7 +35,6 @@ _memory_cache: dict[str, str] = {}
 _store: BaseStore | None = None
 """全局 Store 实例（持久化 ``SqliteStore``），由 ``set_store()`` 设置。"""
 
-_extraction_llm: Any = None
 """记忆提取 LLM（惰性初始化）。"""
 
 
@@ -91,8 +90,6 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
     只处理 ``HumanMessage`` + ``AIMessage`` 两类消息；
     用 LLM 去重后写入 ``Store.put()``。
     """
-    global _extraction_llm
-
     messages = state.get("messages", [])
     user_id = state.get("user_id", "default")
     dlog("main", "save_memory", "进入节点", user_id=user_id, msgs_n=len(messages))
@@ -131,15 +128,13 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
     conv_text = "\n\n".join(conv_parts)
 
     # LLM 提取
-    if _extraction_llm is None:
-        _extraction_llm = get_chat_model(EXTRACTION_MODEL)
-
+    extraction_llm = get_chat_model(EXTRACTION_MODEL)
     prompt = build_extraction_prompt(
         existing_facts=existing_str,
         conversation=conv_text,
     )
     dlog("main", "save_memory", "调用 LLM 提取事实")
-    response = _extraction_llm.invoke(prompt)
+    response = extraction_llm.invoke(prompt)
     raw = (
         response.content if isinstance(response.content, str) else str(response.content)
     )

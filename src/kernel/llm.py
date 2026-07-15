@@ -1,11 +1,7 @@
 """LLM 工厂——统一构造聊天模型实例。
 
-所有 agent 节点通过 ``from kernel.llm import get_chat_model`` 引用。模型名与 provider
-配置从 ``kernel.config`` 读取（R2 收口，消除散落的硬编码模型名）。
-
-.. note::
-   选项 A（重启切换）：改 ``kernel/config.py`` 或对应环境变量后重启即切模型，
-   不做 per-request / per-user 注入式多模型（Non-Goal）。
+所有 Agent 节点通过 ``get_chat_model`` 获取实例。FastAPI 游客请求优先使用请求级
+``RuntimeModelConfig``；开发身份和 LangGraph Studio 没有请求上下文，继续读取 `.env`。
 """
 
 from __future__ import annotations
@@ -17,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from kernel.config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEFAULT_MODEL
+from kernel.runtime_model import get_runtime_model
 
 
 def get_chat_model(
@@ -37,8 +34,28 @@ def get_chat_model(
     Returns:
         ``BaseChatModel`` 实例（已按需 bind_tools）。
     """
-    if model is None:
-        model = DEFAULT_MODEL
+    runtime = get_runtime_model()
+    if runtime is not None:
+        selected_model = runtime.model
+        llm: BaseChatModel = ChatOpenAI(
+            model=selected_model,
+            api_key=SecretStr(runtime.api_key),
+            base_url=runtime.base_url,
+        )
+    elif model is None:
+        selected_model = DEFAULT_MODEL
+        llm = _environment_model(selected_model)
+    else:
+        selected_model = model
+        llm = _environment_model(selected_model)
+
+    if tools:
+        llm = cast(BaseChatModel, llm.bind_tools(tools))
+    return llm
+
+
+def _environment_model(model: str) -> BaseChatModel:
+    """为 Studio 或受控开发身份创建使用服务端 `.env` 的模型。"""
     if "deepseek" in model.lower():
         llm: BaseChatModel = ChatOpenAI(
             model=model,
@@ -47,7 +64,4 @@ def get_chat_model(
         )
     else:
         llm = ChatOpenAI(model=model)
-
-    if tools:
-        llm = cast(BaseChatModel, llm.bind_tools(tools))
     return llm

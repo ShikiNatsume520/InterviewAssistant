@@ -82,25 +82,6 @@ from kernel.llm import get_chat_model
 from kernel.logging import dlog
 
 # --------------------------------------------------------------------------- #
-# 全局 LLM（惰性初始化，与 research 子图同模式）
-# --------------------------------------------------------------------------- #
-
-_resume_chat_llm: Any = None
-_plan_llm: Any = None
-
-
-def _init_llms() -> None:
-    """惰性初始化 chat_node（bind 编辑/计划工具）与 plan_node 的 LLM。"""
-    global _resume_chat_llm, _plan_llm
-    if _resume_chat_llm is None:
-        _resume_chat_llm = get_chat_model(
-            RESUME_MODEL, tools=EDIT_TOOLS + [request_plan]
-        )
-    if _plan_llm is None:
-        _plan_llm = get_chat_model(RESUME_MODEL)
-
-
-# --------------------------------------------------------------------------- #
 # 动作工具：request_plan（仅作路由信号，被路由拦截，不进 ToolNode）
 # --------------------------------------------------------------------------- #
 
@@ -190,14 +171,14 @@ def chat_node(state: ResumeState) -> dict[str, Any]:
     前端 token（ns=resume_agent），interrupt payload 不带 LLM 文本。选区不再存 state，
     suggest 的 selection 由节点注入 HumanMessage，chat_node 从 messages 读。
     """
-    _init_llms()
+    resume_chat_llm = get_chat_model(RESUME_MODEL, tools=EDIT_TOOLS + [request_plan])
     resume_shot = state.get("resume_shot", "")
     plan = state.get("plan", [])
     system_prompt = build_chat_prompt(resume_shot, plan, None)
     prompt = ChatPromptTemplate.from_messages(
         [("system", system_prompt), ("placeholder", "{messages}")]
     )
-    chain = prompt | _resume_chat_llm
+    chain = prompt | resume_chat_llm
     response = chain.invoke({"messages": state.get("messages", [])})
     tcs = getattr(response, "tool_calls", []) or []
     if tcs:
@@ -259,11 +240,11 @@ def plan_node(state: ResumeState) -> dict[str, Any]:
     suggest 回到本节点重规划时 ``messages[-1]`` 是 HumanMessage（无 tool_calls），
     不补——避免孤儿 ToolMessage。
     """
-    _init_llms()
+    plan_llm = get_chat_model(RESUME_MODEL)
     resume = state.get("resume_shot", "")
     intent = _extract_last_intent(state)
     dlog("resume", "plan_node", "进入规划", intent=intent, resume_len=len(resume))
-    resp = _plan_llm.invoke(build_plan_prompt(resume=resume, intent=intent))
+    resp = plan_llm.invoke(build_plan_prompt(resume=resume, intent=intent))
     raw = resp.content if isinstance(resp.content, str) else str(resp.content)
     raw = raw.strip()
     if raw.startswith("```"):

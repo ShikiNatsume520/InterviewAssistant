@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import operator
 from typing import Annotated, Any
 
 from langchain_core.messages import BaseMessage
@@ -28,7 +27,7 @@ class MainState(TypedDict, total=False):
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
-    citations: Annotated[list[Citation], operator.add]
+    citations: list[Citation]
     user_id: str
     current_resume: str
     research_output: dict[str, Any]

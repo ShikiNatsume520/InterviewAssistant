@@ -64,25 +64,6 @@ from kernel.logging import dlog
 from kernel.paths import MARKDOWN_DIR
 
 # --------------------------------------------------------------------------- #
-# 全局 LLM（惰性初始化，与 resume_agent.graph 同模式）
-# --------------------------------------------------------------------------- #
-_outline_llm: Any = None
-_distill_llm: Any = None
-_finalize_llm: Any = None
-
-
-def _init_llms() -> None:
-    """惰性初始化本子图用到的三组 LLM。"""
-    global _outline_llm, _distill_llm, _finalize_llm
-    if _outline_llm is None:
-        _outline_llm = get_chat_model(RESEARCH_MODEL)
-    if _distill_llm is None:
-        _distill_llm = get_chat_model(RESEARCH_MODEL)
-    if _finalize_llm is None:
-        _finalize_llm = get_chat_model(RESEARCH_MODEL)
-
-
-# --------------------------------------------------------------------------- #
 # outline 阶段
 # --------------------------------------------------------------------------- #
 
@@ -106,7 +87,7 @@ def _parse_json_list(raw: str) -> list[str]:
 
 def outline_node(state: ResearchState) -> dict[str, Any]:
     """LLM 产出 3-5 个检索词 outline（重规划时参考用户建议）。"""
-    _init_llms()
+    outline_llm = get_chat_model(RESEARCH_MODEL)
     gap_topic = state.get("gap_topic", "")
     feedback = state.get("outline_feedback", "")
     dlog("research", "outline_node", "进入", gap_topic=gap_topic, feedback=feedback)
@@ -114,7 +95,7 @@ def outline_node(state: ResearchState) -> dict[str, Any]:
     feedback_block = (
         f"\n=== 用户对上次大纲的建议（请据此调整）===\n{feedback}\n" if feedback else ""
     )
-    resp = _outline_llm.invoke(
+    resp = outline_llm.invoke(
         build_outline_prompt(gap_topic=gap_topic, feedback_block=feedback_block)
     )
     raw = resp.content if isinstance(resp.content, str) else str(resp.content)
@@ -289,14 +270,14 @@ def route_after_connectivity_interrupt(state: ResearchState) -> str:
 def _distill(query: str, title: str, content: str) -> str:
     """LLM 从单页正文提炼与查询相关的结构化笔记。"""
     prompt = build_distill_prompt(query=query, title=title, content=content[:6000])
-    resp = _distill_llm.invoke(prompt)
+    distill_llm = get_chat_model(RESEARCH_MODEL)
+    resp = distill_llm.invoke(prompt)
     raw = resp.content if isinstance(resp.content, str) else str(resp.content)
     return raw.strip()
 
 
 def search_node(state: ResearchState) -> dict[str, Any]:
     """遍历 outline 逐词: ddgs top-3 URL → 爬正文 → LLM 提炼笔记 → 累积。"""
-    _init_llms()
     outline = state.get("outline", [])
     dlog("research", "search_node", "开始搜索", outline_n=len(outline), outline=outline)
 
@@ -370,7 +351,7 @@ def _render_notes(notes: list[ResearchNote]) -> str:
 
 def finalize_node(state: ResearchState) -> dict[str, Any]:
     """LLM 整理笔记成结构化 Markdown, 写入 data/markdown/。"""
-    _init_llms()
+    finalize_llm = get_chat_model(RESEARCH_MODEL)
     gap_topic = state.get("gap_topic", "")
     notes = state.get("research_notes", [])
     dlog(
@@ -382,7 +363,7 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
         markdown = f"# 深研资料: {gap_topic}\n\n> 深研未取得有效资料。\n"
         summary = f"深研「{gap_topic}」未搜集到有效资料。"
     else:
-        resp = _finalize_llm.invoke(
+        resp = finalize_llm.invoke(
             build_finalize_prompt(gap_topic=gap_topic, notes=_render_notes(notes))
         )
         markdown = resp.content if isinstance(resp.content, str) else str(resp.content)
