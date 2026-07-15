@@ -33,7 +33,7 @@ from agents.main.routing import route_after_chat
 from agents.main.state import MainState
 from kernel.config import CHAT_MODEL
 from kernel.llm import get_chat_model
-from kernel.logging import dlog, slog, summarize_messages
+from kernel.logging import dlog, summarize_messages
 from kernel.persistence import get_store
 
 # --------------------------------------------------------------------------- #
@@ -90,21 +90,14 @@ def chat_node(state: MainState) -> dict[str, Any]:
         "chat_node",
         "进入节点",
         user_id=user_id,
-        msgs=summarize_messages(state.get("messages", [])),
-    )
-    slog(
-        "main",
-        "chat_node",
-        "进入节点",
-        user_id=user_id,
         msgs_n=len(state.get("messages", [])),
+        msgs=summarize_messages(state.get("messages", [])),
     )
     mc = load_memory_context(user_id)
     system_prompt = _build_system_prompt()
     if mc:
         system_prompt += f"\n\n## Memory\n{mc}"
         dlog("main", "chat_node", "已注入长期记忆", memory_len=len(mc))
-        slog("main", "chat_node", "已注入长期记忆", memory_len=len(mc))
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -119,9 +112,6 @@ def chat_node(state: MainState) -> dict[str, Any]:
         dlog(
             "main", "chat_node", "LLM 决策调用工具", tools=[t.get("name") for t in tcs]
         )
-        slog(
-            "main", "chat_node", "LLM 决策调用工具", tools=[t.get("name") for t in tcs]
-        )
     else:
         c = (
             response.content
@@ -129,7 +119,6 @@ def chat_node(state: MainState) -> dict[str, Any]:
             else str(response.content)
         )
         dlog("main", "chat_node", "LLM 直接回复", reply_len=len(c))
-        slog("main", "chat_node", "LLM 直接回复", reply_len=len(c))
     return {"messages": [response]}
 
 
@@ -176,6 +165,9 @@ def build_main_graph(
     # ── 连线 ──
     workflow.set_entry_point("chat_node")
 
+    # path_map 声明 conditional edge 的所有可达节点——route_after_chat 运行时
+    # 返回 list[Send] 直达节点（不经 path_map 映射），但 Studio 静态分析靠
+    # path_map 画 chat_node → 各节点的入边，故必须列出全部可达节点。
     path_map: dict[Any, str] = {
         "save_memory": "save_memory",
         "tools_node": "tools_node",

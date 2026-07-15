@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Resume Agent</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #1a1a1f; color: #e4e4e7; height: 100vh; display: flex; flex-direction: column; }
+  header { background: #2b3a55; color: #fff; padding: 10px 18px; display: flex; align-items: center; gap: 14px; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .status { font-size: 11px; padding: 3px 8px; border-radius: 10px; background: #2c2c36; color: #8b8b96; margin-left: auto; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; flex: 1; overflow: hidden; }
+  .pane { background: #23232b; overflow: auto; padding: 16px; }
+  .pane h2 { font-size: 13px; color: #8b8b96; font-weight: 600; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .5px; }
+  #resume-pane { border-right: 1px solid #3a3a46; }
+  #resume-text { white-space: pre-wrap; font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; line-height: 1.6; }
+  .grep { background: #5a2a2a; border-radius: 2px; padding: 0 1px; text-decoration: line-through; }
+  .replace { background: #2a5a3a; border-radius: 2px; padding: 0 1px; margin-left: 1px; }
+  #messages { display: flex; flex-direction: column; gap: 8px; }
+  .msg { padding: 8px 10px; border-radius: 6px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .msg.human { background: #3a5a8a; align-self: flex-end; max-width: 85%; }
+  .msg.ai { background: #3a3a46; align-self: flex-start; max-width: 85%; }
+  .msg.tool { background: #2a3a1f; align-self: flex-start; max-width: 85%; font-family: monospace; font-size: 12px; }
+  .msg .tag { font-size: 10px; color: #8b8b96; margin-bottom: 3px; text-transform: uppercase; }
+  #modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: center; justify-content: center; z-index: 10; }
+  #modal-overlay.show { display: flex; }
+  .modal { background: #23232b; border-radius: 8px; padding: 20px; width: 420px; max-height: 70vh; overflow: auto; border: 1px solid #3a3a46; }
+  .modal h3 { margin: 0 0 12px; font-size: 15px; }
+  .modal .hint { font-size: 12px; color: #8b8b96; margin-bottom: 10px; }
+  .modal .opt { display: block; padding: 8px 10px; margin: 4px 0; border: 1px solid #3a3a46; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .modal .opt:hover { background: #2c3a5a; border-color: #6b8cff; }
+  .modal input[type=file] { width: 100%; margin: 8px 0; font-size: 12px; }
+  #approve-bar { position: sticky; bottom: 0; background: #23232b; border-top: 1px solid #3a3a46; padding: 8px 0; margin-top: 8px; display: none; gap: 8px; }
+  #approve-bar.show { display: flex; }
+  #approve-bar button { flex: 1; padding: 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  #approve-bar .apv { background: #4ade80; color: #0a0a0a; }
+  #approve-bar .rej { background: #f87171; color: #fff; }
+  #approve-bar .sug { background: #fbbf24; color: #0a0a0a; }
+  #approve-bar input { flex: 2; padding: 7px 8px; border: 1px solid #3a3a46; border-radius: 4px; font-size: 13px; background: #1a1a1f; color: #e4e4e7; }
+  #hitl-bar { display: none; gap: 8px; margin-top: 8px; }
+  #hitl-bar.show { display: flex; }
+  #hitl-bar input { flex: 1; padding: 7px 8px; border: 1px solid #3a3a46; border-radius: 4px; font-size: 13px; background: #1a1a1f; color: #e4e4e7; }
+  #hitl-bar button { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  #hitl-bar .send { background: #6b8cff; color: #fff; }
+  #hitl-bar .exit { background: #fbbf24; color: #0a0a0a; }
+  #plan-box { display: none; background: #2c2c36; border: 1px solid #fbbf24; border-radius: 8px; padding: 12px; margin: 8px 0; }
+  #plan-box.show { display: block; }
+  #plan-box .label { font-size: 11px; color: #fbbf24; font-weight: 600; margin-bottom: 6px; }
+  #plan-box .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  #plan-box .actions input { flex: 1 100%; background: #1a1a1f; border: 1px solid #3a3a46; color: #e4e4e7; border-radius: 4px; padding: 6px; font-size: 12px; }
+  #plan-box .actions button { padding: 6px 14px; border-radius: 4px; border: none; cursor: pointer; font-size: 12px; }
+  #plan-box .apv { background: #4ade80; color: #0a0a0a; }
+  #plan-box .sug { background: #fbbf24; color: #0a0a0a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Resume Agent</h1>
+  <span class="status" id="busy-status">初始化…</span>
+</header>
+<main>
+  <section class="pane" id="resume-pane">
+    <h2>简历内容</h2>
+    <div id="resume-text">（尚未选择简历）</div>
+    <div id="approve-bar">
+      <button class="apv" onclick="approve('approve')">批准</button>
+      <button class="rej" onclick="approve('reject')">拒绝</button>
+      <input id="suggest-input" placeholder="建议内容（输入后点建议）" />
+      <button class="sug" onclick="approveSuggest()">建议</button>
+    </div>
+  </section>
+  <section class="pane" id="chat-pane">
+    <h2>对话 / 消息</h2>
+    <div id="messages"></div>
+    <div id="plan-box">
+      <div class="label">⚙ 计划确认</div>
+      <div id="plan-list"></div>
+      <div class="actions">
+        <input id="plan-suggest-input" placeholder="对计划的建议（可选）" />
+        <button class="apv" onclick="planApprove()">批准计划</button>
+        <button class="sug" onclick="planSuggest()">提交建议</button>
+      </div>
+    </div>
+    <div id="hitl-bar">
+      <input id="new-request-input" placeholder="新的修改意图，或直接退出" />
+      <button class="send" onclick="hitlNewRequest()">继续修改</button>
+      <button class="exit" onclick="hitlExit()">退出</button>
+    </div>
+  </section>
+</main>
+
+<div id="modal-overlay">
+  <div class="modal">
+    <h3>选择简历文件</h3>
+    <div class="hint">选择一个本地 .md 简历文件进行优化。</div>
+    <input type="file" id="dir-input" accept=".md,text/markdown" style="display:none" />
+    <button id="pick-dir-btn" style="display:block;width:100%;padding:10px;margin:8px 0;background:#6b8cff;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:14px;">📁 选择 .md 文件…</button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const chat = $("messages");
+const resumeText = $("resume-text");
+
+const params = new URLSearchParams(location.search);
+const THREAD = params.get("thread") || "";
+const URL_INTENT = params.get("intent") || "";
+
+let busy = false;
+let currentAIMsg = null;
+let resumeShot = "";
+let lastInterrupt = null;
+
+// 统一 POST 日志（便于追踪 bug）：每次 fetch 打 [resume POST] tag
+function dbgPost(tag, url, body, extra) {
+  const ts = new Date().toLocaleTimeString();
+  const line = `[${ts}] [resume POST] ${tag} ${url}` +
+    (body ? ` body=${JSON.stringify(body).slice(0, 200)}` : "") +
+    (extra ? ` ${extra}` : "");
+  console.log(line);
+}
+
+function setStatus(s) { $("busy-status").textContent = s; }
+function setBusy(b) { busy = b; if (!b && $("busy-status").textContent === "运行中…") $("busy-status").textContent = "就绪"; }
+
+function renderResume(shot, edits) {
+  if (!shot) { resumeText.textContent = "（尚未选择简历）"; return; }
+  if (!edits || edits.length === 0) { resumeText.textContent = shot; return; }
+  const positions = [];
+  let cursor = 0;
+  for (const e of edits) {
+    if (!e.grep_target) continue;
+    const idx = shot.indexOf(e.grep_target, cursor);
+    if (idx === -1) continue;
+    positions.push({ idx, target: e.grep_target, replace: e.replace_content });
+    cursor = idx + e.grep_target.length;
+  }
+  positions.sort((a, b) => a.idx - b.idx);
+  let html = "";
+  let cur = 0;
+  for (const p of positions) {
+    html += escapeHtml(shot.slice(cur, p.idx));
+    html += `<span class="grep">${escapeHtml(p.target)}</span><span class="replace">${escapeHtml(p.replace)}</span>`;
+    cur = p.idx + p.target.length;
+  }
+  html += escapeHtml(shot.slice(cur));
+  resumeText.innerHTML = html;
+}
+function escapeHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+function appendMessage(m) {
+  const div = document.createElement("div");
+  div.className = "msg " + (m.type || "ai");
+  const tag = document.createElement("div"); tag.className = "tag"; tag.textContent = m.type || "msg";
+  const body = document.createElement("div"); body.textContent = m.content || "";
+  div.appendChild(tag); div.appendChild(body);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+function appendHuman(text) { return appendMessage({ type: "human", content: text }); }
+function startAIMsg() { currentAIMsg = appendMessage({ type: "ai", content: "" }); return currentAIMsg; }
+function clearMessages() { chat.innerHTML = ""; }
+
+function restoreMessages(msgs) {
+  clearMessages();
+  if (!msgs || !msgs.length) { if (URL_INTENT) appendHuman(URL_INTENT); return; }
+  for (const m of msgs) appendMessage(m);
+}
+
+function showSelectModal() {
+  console.log("[resume] showSelectModal called");
+  setStatus("请选择简历文件");
+  $("modal-overlay").classList.add("show");
+  const dirInput = $("dir-input");
+  dirInput.value = "";
+  dirInput.onchange = () => {
+    console.log("[resume] file onchange, files.length=", dirInput.files.length);
+    if (dirInput.files.length) {
+      closeModal();
+      readAndSelect(dirInput.files[0]);
+    }
+  };
+  $("pick-dir-btn").onclick = () => {
+    console.log("[resume] pick-btn click → dir-input.click()");
+    dirInput.click();
+  };
+}
+function closeModal() { $("modal-overlay").classList.remove("show"); }
+
+function onDirSelected(fileList) {
+  const box = $("modal-files");
+  box.innerHTML = "";
+  const files = Array.from(fileList || []);
+  console.log("[resume] onDirSelected files.length=", files.length,
+    "names=", files.slice(0, 10).map((f) => f.name));
+  if (!files.length) { box.innerHTML = '<div class="hint">未选择任何目录或目录为空，请重选。</div>'; return; }
+  const mdFiles = files.filter((f) => f.name.toLowerCase().endsWith(".md"));
+  console.log("[resume] mdFiles.length=", mdFiles.length, "names=", mdFiles.map((f) => f.name));
+  if (!mdFiles.length) {
+    box.innerHTML = '<div class="hint">该目录下没有 .md 文件。目录内文件（前 10）：<br>'
+      + files.slice(0, 10).map((f) => f.name).join("<br>") + "</div>";
+    return;
+  }
+  setStatus("找到 " + mdFiles.length + " 个 .md 文件，请选择");
+  for (const f of mdFiles) {
+    const a = document.createElement("a");
+    a.className = "opt"; a.textContent = f.webkitRelativePath || f.name;
+    a.onclick = () => { closeModal(); readAndSelect(f); };
+    box.appendChild(a);
+  }
+}
+
+function readAndSelect(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const shot = String(reader.result || "");
+    resumeShot = shot;
+    renderResume(shot, null);
+    setStatus("已选择简历，发送给后端…");
+    sendChat({ resume_value: { resume_file: file.name, resume_shot: shot } });
+  };
+  reader.onerror = () => setStatus("读取文件失败");
+  reader.readAsText(file);
+}
+
+function showApproveBar(show) { $("approve-bar").classList.toggle("show", show); }
+function approve(decision) {
+  // 更新本地 shot：approve→after（采纳修改），reject/suggest→before（撤销整波）
+  if (lastInterrupt) {
+    resumeShot = (decision === "approve" ? lastInterrupt.after : lastInterrupt.before) || resumeShot;
+    renderResume(resumeShot, null);
+  }
+  sendChat({ resume_value: { decision } }); showApproveBar(false);
+}
+function approveSuggest() {
+  const s = $("suggest-input").value.trim();
+  if (!s) { setStatus("请填写建议内容"); return; }
+  if (lastInterrupt) { resumeShot = lastInterrupt.before || resumeShot; renderResume(resumeShot, null); }
+  sendChat({ resume_value: { decision: "suggest", suggestion: s } });
+  showApproveBar(false); $("suggest-input").value = "";
+}
+
+function showPlan(plan) {
+  const list = $("plan-list"); list.innerHTML = "";
+  (plan || []).forEach((s, i) => { const d = document.createElement("div"); d.textContent = `${i+1}. ${s}`; list.appendChild(d); });
+  $("plan-box").classList.add("show");
+}
+function hidePlan() { $("plan-box").classList.remove("show"); }
+function planApprove() { hidePlan(); sendChat({ resume_value: { decision: "approve" } }); }
+function planSuggest() {
+  const s = $("plan-suggest-input").value.trim();
+  if (!s) { setStatus("请填写建议内容"); return; }
+  hidePlan(); sendChat({ resume_value: { decision: "suggest", suggestion: s } });
+  $("plan-suggest-input").value = "";
+}
+
+function showHitl(summary) { if (summary) appendMessage({ type: "ai", content: summary }); $("hitl-bar").classList.add("show"); }
+function hideHitl() { $("hitl-bar").classList.remove("show"); }
+function hitlNewRequest() {
+  const r = $("new-request-input").value.trim();
+  if (!r) { setStatus("请输入新的修改意图"); return; }
+  hideHitl(); appendHuman(r);
+  sendChat({ resume_value: { action: "new_request", request: r } });
+  $("new-request-input").value = "";
+}
+function hitlExit() {
+  const save = confirm("保存并退出？\n确定=保存退出，取消=不保存退出");
+  hideHitl();
+  sendChat({ resume_value: { action: "exit", save } });
+}
+
+function renderInterruptUI(intr) {
+  lastInterrupt = intr;
+  if (!intr) { setStatus("无 pending interrupt"); return; }
+  console.log("[resume] renderInterruptUI phase=", intr.phase, "edits=", intr.edits, "before_len=", (intr.before||"").length, "after_len=", (intr.after||"").length);
+  const phase = intr.phase;
+  if (phase === "resume_select") {
+    showApproveBar(false); hidePlan(); hideHitl(); showSelectModal();
+  } else if (phase === "resume_approve") {
+    // diff 标红绿基于 before（grep_target 在 before 里，after 里已被替换掉）
+    renderResume(intr.before || resumeShot, intr.edits || []);
+    showApproveBar(true); hidePlan(); hideHitl();
+    setStatus("请批准 / 拒绝 / 建议");
+  } else if (phase === "plan_confirm") {
+    showPlan(intr.plan || []);
+    showApproveBar(false); hideHitl();
+    setStatus("请审阅计划");
+  } else if (phase === "resume_hitl") {
+    showApproveBar(false); hidePlan();
+    showHitl(intr.summary || "");
+    setStatus("会话待命：继续修改或退出");
+  } else {
+    setStatus("未知 interrupt: " + phase);
+  }
+}
+
+async function sendChat(body) {
+  if (busy) return;
+  if (!THREAD) { setStatus("thread 为空，无法发送"); return; }
+  const payload = { thread_id: THREAD, message: "", ...body };
+  dbgPost("sendChat", "/v1/chat", payload);
+  setBusy(true); startAIMsg();
+  try {
+    const resp = await fetch("/v1/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    dbgPost("sendChat resp", "/v1/chat", null, `status=${resp.status}`);
+    await consumeSSE(resp);
+  } catch (e) { setStatus("请求失败: " + e.message); }
+  setBusy(false);
+}
+
+async function postCheckpoint() {
+  if (busy) return;
+  const payload = { thread_id: THREAD };
+  dbgPost("postCheckpoint", "/v1/checkpoint", payload);
+  setBusy(true); startAIMsg();
+  try {
+    const resp = await fetch("/v1/checkpoint", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    dbgPost("postCheckpoint resp", "/v1/checkpoint", null, `status=${resp.status}`);
+    await consumeSSE(resp);
+  } catch (e) { setStatus("续跑失败: " + e.message); }
+  setBusy(false);
+}
+
+async function consumeSSE(resp) {
+  if (!resp.body) return;
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let localInterrupt = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const SEP = "\r\n\r\n";
+    let idx;
+    while ((idx = buf.indexOf(SEP)) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + SEP.length);
+      const evt = parseSSE(frame);
+      if (evt.event === "token" && evt.data) {
+        try {
+          const tok = JSON.parse(evt.data);
+          if (tok.ns === "resume_agent" && tok.text) {
+            if (!currentAIMsg) startAIMsg();
+            currentAIMsg.textContent += tok.text;
+            chat.scrollTop = chat.scrollHeight;
+          }
+        } catch (e) { /* 忽略 */ }
+      } else if (evt.event === "interrupt") {
+        try {
+          const parsed = JSON.parse(evt.data);
+          localInterrupt = parsed.interrupts ? (Array.isArray(parsed.interrupts) && parsed.interrupts.length ? parsed.interrupts[0] : parsed.interrupts) : parsed;
+        } catch (e) { /* 忽略 */ }
+      } else if (evt.event === "done" && evt.data) {
+        try {
+          const d = JSON.parse(evt.data);
+          if (d.current_resume) downloadResume(d.current_resume);
+          setStatus("简历优化完成，返回主页…");
+          setTimeout(() => { location.href = "/"; }, 800);
+        } catch (e) { /* 忽略 */ }
+      }
+    }
+  }
+  currentAIMsg = null;
+  if (localInterrupt) renderInterruptUI(localInterrupt);
+}
+
+function parseSSE(frame) {
+  const lines = frame.split(/\r?\n/);
+  let event = "message";
+  const dataParts = [];
+  for (const ln of lines) {
+    if (ln.startsWith("event:")) event = ln.slice(6).trim();
+    else if (ln.startsWith("data:")) { let d = ln.slice(5); if (d.startsWith(" ")) d = d.slice(1); dataParts.push(d); }
+  }
+  return { event, data: dataParts.join("\n") };
+}
+
+function downloadResume(content) {
+  try {
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "resume_edited.md";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  } catch (e) { setStatus("下载失败: " + e.message); }
+}
+
+async function init() {
+  if (!THREAD) { setStatus("thread 为空，请从主页进入"); return; }
+  let st = null;
+  try {
+    dbgPost("init GET", "/v1/state", null, `thread=${THREAD}`);
+    const resp = await fetch("/v1/state?thread_id=" + encodeURIComponent(THREAD));
+    dbgPost("init GET resp", "/v1/state", null, `status=${resp.status}`);
+    if (resp.ok) st = await resp.json();
+    else {
+      const t = await resp.text();
+      console.error("GET /v1/state", resp.status, t);
+      setStatus(`GET /v1/state ${resp.status}: ${t.slice(0, 150)}`);
+    }
+  } catch (e) { setStatus("GET /v1/state 失败: " + e.message); }
+
+  if (!st) { setStatus("无法获取状态，请从主页进入"); return; }
+  if (!st.in_resume) { setStatus("非 resume 会话，返回主页…"); location.href = "/"; return; }
+
+  const resume = st.resume || {};
+  if (resume.resume_shot) { resumeShot = resume.resume_shot; renderResume(resumeShot, null); }
+  restoreMessages(resume.messages || []);
+
+  if (st.pending_interrupt) {
+    renderInterruptUI(st.pending_interrupt);
+  } else if (st.next && st.next.length) {
+    setStatus("恢复上次执行…");
+    postCheckpoint();
+  } else {
+    setStatus("会话已结束");
+  }
+}
+init();
+</script>
+</body>
+</html>

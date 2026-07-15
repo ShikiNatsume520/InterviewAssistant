@@ -7,15 +7,15 @@
                   │ approve               │ suggest          │ reject
                   ▼                       ▼                 ▼
           connectivity_check_node   回 outline_node      END (approval_status=rejected)
-            (ddgs 探测)
-              │ ok                │ fail
+            (ddgs 探测 + PRE-INTERRUPT 写 attempts + _pending_interrupt)
+              │ ok                │ fail（写 attempts + payload）
               ▼                   ▼
-            search_node    interrupt("提示挂梯子")
-              │           ┌──────────────────────────────────┐
-              ▼           │ POST: connect_attempts+1         │
-            finalize_node │  route: attempts<3 回自身         │
-              │          │         attempts>=3 → abort       │
-              ▼          └──────────────────────────────────┘
+            search_node    connectivity_interrupt_node (interrupt 挂起)
+              │           ┌──────────────────────────────────────┐
+              ▼           │ resume 后 route:                      │
+            finalize_node │  再 probe: 通→search; 不通 attempts>=3→abort; 否则回 connectivity_check
+              │          └──────────────────────────────────────┘
+              ▼
             index_rebuild_node (await index_agent.graph.graph.ainvoke)
               │
               ▼
@@ -23,14 +23,15 @@
 
 关键机制
 --------
-- ``outline_confirm_node`` / ``connectivity_check_node`` 用 ``interrupt()`` 挂起。
+- ``outline_confirm_node`` / ``connectivity_interrupt_node`` 用 ``interrupt()`` 挂起。
   wrapper（``research_agent_node``）透传 ``GraphInterrupt``，主图线程暂停，
-  下一轮 ``Command(resume=...)`` 精准恢复（原型 phase6_subgraph_interrupt_probe.py
-  验证通过）。
-- ``connectivity_check_node`` 的重试循环: ``interrupt()`` resume 后节点从头重跑,
-  重跑到 ``interrupt()`` 那行返回 resume 值并继续其后代码 —— 故 ``connect_attempts``
-  累计写在 ``interrupt()`` 之后的 return 里, 由 ``route_after_connectivity`` 据次数
-  路由（3 次失败 → abort）。
+  下一轮 ``Command(resume=...)`` 精准恢复。
+- ``connect_attempts`` **PRE-INTERRUPT** 写入（connectivity_check_node return 里）,
+  随 checkpoint 持久化。POST-INTERRUPT 写会丢（resume 读挂起前快照），导致 attempts
+  永远从初始值开始 → 死循环无法 abort。故拆成 connectivity_check（写累计+payload）+
+  connectivity_interrupt（只挂起）两节点，保证 attempts 持久化后再 interrupt。
+- ``connectivity_interrupt_node`` resume 后 ``route_after_connectivity_interrupt`` 重新
+  probe；通了 search，没通且 attempts>=3 abort，否则回 connectivity_check 再累计。
 - ``index_rebuild_node`` 跨子图调用 Index Agent（后台 agent，不进主图流程）。
 """
 
@@ -53,9 +54,13 @@ from agents.research.state import ResearchNote, ResearchState
 from agents.research.tools.web_fetch import fetch_text
 from agents.research.tools.web_search import connectivity_probe, search
 from kernel.config import RESEARCH_MODEL
-from kernel.contracts import ConnectivityCheckPayload, OutlineConfirmPayload
+from kernel.contracts import (
+    ConnectivityCheckPayload,
+    DecisionInbound,
+    OutlineConfirmPayload,
+)
 from kernel.llm import get_chat_model
-from kernel.logging import dlog, slog
+from kernel.logging import dlog
 from kernel.paths import MARKDOWN_DIR
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +110,6 @@ def outline_node(state: ResearchState) -> dict[str, Any]:
     gap_topic = state.get("gap_topic", "")
     feedback = state.get("outline_feedback", "")
     dlog("research", "outline_node", "进入", gap_topic=gap_topic, feedback=feedback)
-    slog("research", "outline_node", "进入", gap_topic=gap_topic)
 
     feedback_block = (
         f"\n=== 用户对上次大纲的建议（请据此调整）===\n{feedback}\n" if feedback else ""
@@ -114,13 +118,13 @@ def outline_node(state: ResearchState) -> dict[str, Any]:
         build_outline_prompt(gap_topic=gap_topic, feedback_block=feedback_block)
     )
     raw = resp.content if isinstance(resp.content, str) else str(resp.content)
-    slog("research", "outline_node", "LLM 返回", raw_preview=raw[:200])
+    dlog("research", "outline_node", "LLM 返回", raw_preview=raw[:200])
 
     outline = _parse_json_list(raw)
     if not outline:
         # 兜底：用 gap_topic 本身做单次检索
         outline = [gap_topic]
-    slog("research", "outline_node", "规划完成", outline=outline)
+    dlog("research", "outline_node", "规划完成", outline=outline)
     # 清掉已消费的 feedback，避免下次重规划时残留
     return {
         "outline": outline,
@@ -140,28 +144,20 @@ def outline_confirm_node(state: ResearchState) -> dict[str, Any]:
         "interrupt 等待用户确认大纲",
         outline=outline,
     )
-    slog(
-        "research",
-        "outline_confirm_node",
-        "interrupt 等待用户确认大纲",
-        outline=outline,
-    )
     value = interrupt(
         OutlineConfirmPayload(gap_topic=gap_topic, outline=outline).model_dump()
     )
     dlog("research", "outline_confirm_node", "收到用户回复", value=value)
-    slog("research", "outline_confirm_node", "收到用户回复", value=value)
-    # value: "approve" | {"decision":"suggest","suggestion":"..."} | "reject"
-    if isinstance(value, dict) and value.get("decision") == "suggest":
-        suggestion = str(value.get("suggestion", ""))
+    # server 已归一化为 {action: approve|reject|suggest, suggestion?, selection?}
+    inbound = DecisionInbound.model_validate(value if isinstance(value, dict) else {})
+    if inbound.action == "suggest":
         return {
             "outline": [],  # 触发回 outline_node 重新规划
-            "outline_feedback": suggestion,
+            "outline_feedback": inbound.suggestion,
         }
-    if str(value).strip() in ("reject", "拒绝", "拒绝深研"):
+    if inbound.action == "reject":
         return {"approval_status": "rejected"}
-    # approve 或裸字符串批准
-    return {}
+    return {}  # approve
 
 
 def route_after_outline_confirm(state: ResearchState) -> str:
@@ -177,69 +173,109 @@ def route_after_outline_confirm(state: ResearchState) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 连通性检查阶段（重试循环，原型实测的控制流）
+# 连通性检查阶段（重试循环）
 # --------------------------------------------------------------------------- #
 def connectivity_check_node(state: ResearchState) -> dict[str, Any]:
     """连通性检查: ddgs 探测; 失败 interrupt 提示挂梯子, resume 后回自身重试, 3 次失败 abort。
 
-    关键机制(原型实测): ``interrupt()`` resume 后节点从头重跑, 重跑到 ``interrupt()`` 那行
-    返回 resume 值并继续其后代码。故失败次数累计写在 ``interrupt()`` 之后的 return 里
-    (POST-INTERRUPT), 由 ``route_after_connectivity`` 据次数路由。
+    关键机制: ``connect_attempts`` **在 interrupt 之前**累计写入 state（PRE-INTERRUPT）。
+    不能写在 interrupt 之后——POST-INTERRUPT 节点从头重跑, 读的 state 是 interrupt
+    挂起时的快照（checkpoint 存的是挂起前状态）, 后写的累计会丢, 导致 attempts
+    永远从初始值开始 → 死循环无法 abort。PRE-INTERRUPT 写则随 checkpoint 持久化,
+    resume 后 route 能读到正确累计值。
     """
     attempts = state.get("connect_attempts", 0)
-    dlog("research", "connectivity_check_node", "ENTER", attempts=attempts)
-    slog("research", "connectivity_check_node", "检查连通性", attempts=attempts)
+    dlog("research", "connectivity_check_node", "检查连通性", attempts=attempts)
 
     if connectivity_probe():
         dlog("research", "connectivity_check_node", "连通 OK → search")
-        slog("research", "connectivity_check_node", "连通 OK")
         return {"connectivity_ok": True}
 
     new_attempts = attempts + 1
-    dlog("research", "connectivity_check_node", f"第 {new_attempts} 次失败 → interrupt")
-    slog(
+    dlog(
         "research",
         "connectivity_check_node",
-        "连通失败, interrupt 提示挂梯子",
+        f"第 {new_attempts} 次失败 → interrupt",
         attempts=new_attempts,
     )
-    interrupt(
-        ConnectivityCheckPayload(
+    # PRE-INTERRUPT: 先把累计 attempts 写入 state（随 checkpoint 持久化），再 interrupt
+    # 这样 resume 后 route_after_connectivity 读到的是持久化后的 new_attempts
+    return {
+        "connect_attempts": new_attempts,
+        "connectivity_ok": False,
+        "_pending_interrupt": ConnectivityCheckPayload(
             attempts=new_attempts,
             msg=(
                 f"无法连接 DuckDuckGo（第 {new_attempts} 次），请挂梯子后回复任意"
                 "内容继续；累计 3 次失败将终止深研。"
             ),
-        ).model_dump()
-    )
-    # POST-INTERRUPT: resume 后从这里继续, 把失败次数写回 state 供条件边路由
+        ).model_dump(),
+    }
+
+
+def connectivity_interrupt_node(state: ResearchState) -> dict[str, Any]:
+    """挂起 interrupt 提示挂梯子（与 connectivity_check 分离, 保证 attempts 已持久化）。
+
+    connectivity_check PRE-INTERRUPT 写 attempts 后路由到本节点, 本节点只负责 interrupt。
+    resume 后本节点重跑到 interrupt 不再阻塞, route_after_connectivity 读已持久化的
+    attempts 判定 abort/重试。
+    """
+    payload = state.get("_pending_interrupt") or {}
     dlog(
         "research",
-        "connectivity_check_node",
-        "POST-INTERRUPT, 写回 attempts",
-        new_attempts=new_attempts,
+        "connectivity_interrupt_node",
+        "interrupt 等待挂梯子",
+        attempts=payload.get("attempts"),
     )
-    return {"connect_attempts": new_attempts, "connectivity_ok": False}
+    interrupt(payload)
+    dlog("research", "connectivity_interrupt_node", "POST-INTERRUPT resume")
+    return {}
 
 
 def route_after_connectivity(state: ResearchState) -> str:
-    """连通性检查后: ok → search; 失败且 attempts>=3 → abort; 否则回自身重试。"""
+    """connectivity_check 后: ok → search; 失败 → connectivity_interrupt（挂起）; abort 在 interrupt resume 后判。
+
+    connectivity_check 失败时已 PRE-INTERRUPT 写 attempts + _pending_interrupt, 路由到
+    connectivity_interrupt 挂起。abort 判定不在本节点做——resume 后要再 probe 一次
+    看是否通（通了就 search）, 没通且 attempts>=3 才 abort。故本路由:
+    - connectivity_ok → search
+    - 失败（有 _pending_interrupt）→ connectivity_interrupt
+    """
     if state.get("connectivity_ok"):
         dlog("research", "route_after_connectivity", "→ search")
         return "search"
+    dlog(
+        "research",
+        "route_after_connectivity",
+        "→ connectivity_interrupt（挂起等挂梯子）",
+        attempts=state.get("connect_attempts", 0),
+    )
+    return "connectivity_interrupt"
+
+
+def route_after_connectivity_interrupt(state: ResearchState) -> str:
+    """挂梯子 resume 后路由: 再 probe; 通→search; 不通且 attempts>=3→abort; 否则回 connectivity_check。
+
+    resume 后本路由被调用（connectivity_interrupt_node return {} 后）。此时 attempts
+    已是累计值（PRE-INTERRUPT 持久化的）。重新 probe 一次看梯子是否挂好:
+    - 通了 → search（不再走 connectivity_check 的 probe, 直接 search）
+    - 没通: attempts>=3 → abort; 否则回 connectivity_check（累计 attempts + 再 interrupt）
+    """
+    if connectivity_probe():
+        dlog("research", "route_after_connectivity_interrupt", "梯子已通 → search")
+        return "search"
     attempts = state.get("connect_attempts", 0)
     if attempts >= 3:
-        dlog("research", "route_after_connectivity", "3 次失败 → abort")
-        slog(
+        dlog(
             "research",
-            "route_after_connectivity",
+            "route_after_connectivity_interrupt",
             "3 次失败 → abort",
             attempts=attempts,
         )
         return "abort"
     dlog(
         "research",
-        "route_after_connectivity",
+        "route_after_connectivity_interrupt",
         f"回 connectivity_check 重试 (attempts={attempts})",
     )
     return "connectivity_check"
@@ -262,13 +298,12 @@ def search_node(state: ResearchState) -> dict[str, Any]:
     """遍历 outline 逐词: ddgs top-3 URL → 爬正文 → LLM 提炼笔记 → 累积。"""
     _init_llms()
     outline = state.get("outline", [])
-    dlog("research", "search_node", "开始搜索", outline=outline)
-    slog("research", "search_node", "开始搜索", outline_n=len(outline))
+    dlog("research", "search_node", "开始搜索", outline_n=len(outline), outline=outline)
 
     notes: list[ResearchNote] = []
     for query in outline:
         results = search(query, max_results=3)
-        slog(
+        dlog(
             "research", "search_node", "ddgs 结果", query=query, results_n=len(results)
         )
         for r in results:
@@ -289,7 +324,7 @@ def search_node(state: ResearchState) -> dict[str, Any]:
                     content=distilled,
                 )
             )
-            slog(
+            dlog(
                 "research",
                 "search_node",
                 "提炼笔记",
@@ -299,7 +334,6 @@ def search_node(state: ResearchState) -> dict[str, Any]:
             )
 
     dlog("research", "search_node", "搜索完成", notes_n=len(notes))
-    slog("research", "search_node", "搜索完成", notes_n=len(notes))
     return {"research_notes": notes}
 
 
@@ -342,7 +376,6 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
     dlog(
         "research", "finalize_node", "整理笔记", notes_n=len(notes), gap_topic=gap_topic
     )
-    slog("research", "finalize_node", "整理笔记", notes_n=len(notes))
 
     if not notes:
         # 无有效笔记: 仍写一个最小记录文件以便索引重建（也可直接 abort, 但写文件更可追溯）
@@ -362,11 +395,11 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
     md_path = MARKDOWN_DIR / file_name
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(markdown, encoding="utf-8")
-    dlog("research", "finalize_node", "已写入文件", path=str(md_path))
-    slog(
+    dlog(
         "research",
         "finalize_node",
         "已写入文件",
+        path=str(md_path),
         file_name=file_name,
         md_len=len(markdown),
     )
@@ -385,10 +418,9 @@ async def index_rebuild_node(state: ResearchState) -> dict[str, Any]:
     """跨子图调用 Index Agent 重建索引（target_files = 新文件名）。"""
     new_file = state.get("new_file_name", "")
     dlog("research", "index_rebuild_node", "调用 index_agent", target_files=[new_file])
-    slog("research", "index_rebuild_node", "调用 index_agent", target_files=[new_file])
 
     if not new_file:
-        slog("research", "index_rebuild_node", "无新文件名, 跳过")
+        dlog("research", "index_rebuild_node", "无新文件名, 跳过")
         return {}
 
     from agents.index.graph import graph as index_graph
@@ -396,7 +428,6 @@ async def index_rebuild_node(state: ResearchState) -> dict[str, Any]:
     result = await index_graph.ainvoke({"target_files": [new_file]})
     n_chunks = len(result.get("chunks", []))
     dlog("research", "index_rebuild_node", "index_agent 完成", n_chunks=n_chunks)
-    slog("research", "index_rebuild_node", "index_agent 完成", n_chunks=n_chunks)
     return {}
 
 
@@ -411,7 +442,6 @@ def abort_node(state: ResearchState) -> dict[str, Any]:
     """
     if not state.get("approval_status"):
         dlog("research", "abort_node", "连通性 3 次失败 → aborted")
-        slog("research", "abort_node", "连通性 3 次失败 → aborted")
         return {"approval_status": "aborted"}
     dlog("research", "abort_node", "用户拒绝深研 → rejected")
     return {}
@@ -430,6 +460,7 @@ def build_research_workflow() -> Any:
     workflow.add_node("outline", outline_node)
     workflow.add_node("outline_confirm", outline_confirm_node)
     workflow.add_node("connectivity_check", connectivity_check_node)
+    workflow.add_node("connectivity_interrupt", connectivity_interrupt_node)
     workflow.add_node("search", search_node)
     workflow.add_node("finalize", finalize_node)
     workflow.add_node("index_rebuild", index_rebuild_node)
@@ -446,9 +477,19 @@ def build_research_workflow() -> Any:
             "abort": "abort",
         },
     )
+    # connectivity_check: ok→search; 失败→connectivity_interrupt（挂起）
     workflow.add_conditional_edges(
         "connectivity_check",
         route_after_connectivity,
+        {
+            "search": "search",
+            "connectivity_interrupt": "connectivity_interrupt",
+        },
+    )
+    # connectivity_interrupt resume 后: 再 probe; 通→search; 不通 attempts>=3→abort; 否则回 connectivity_check
+    workflow.add_conditional_edges(
+        "connectivity_interrupt",
+        route_after_connectivity_interrupt,
         {
             "search": "search",
             "connectivity_check": "connectivity_check",

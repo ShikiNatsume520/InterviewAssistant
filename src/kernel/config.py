@@ -29,7 +29,7 @@ EXTRACTION_MODEL: str = os.getenv("IA_EXTRACTION_MODEL", DEFAULT_MODEL)
 """长期记忆提取（``save_memory_node``）使用的模型。"""
 
 RESUME_MODEL: str = os.getenv("IA_RESUME_MODEL", DEFAULT_MODEL)
-"""简历优化子图（``plan_node`` + ``react_router``）使用的模型。"""
+"""简历优化子图使用的模型。"""
 
 RESEARCH_MODEL: str = os.getenv("IA_RESEARCH_MODEL", DEFAULT_MODEL)
 """自主深研子图（outline / distill / finalize）使用的模型。"""

@@ -27,9 +27,8 @@ from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
 from pydantic import Field
 
-from agents.main.state import MainState
 from agents.research.graph import graph as research_graph
-from kernel.logging import dlog, slog
+from kernel.logging import dlog
 
 
 @tool
@@ -58,7 +57,7 @@ def research_agent(
 
 
 async def research_agent_node(
-    state: MainState, config: RunnableConfig
+    state: dict[str, Any], config: RunnableConfig
 ) -> dict[str, Any]:
     """异步 research_agent 包装节点。
 
@@ -74,25 +73,13 @@ async def research_agent_node(
     - rejected: 用户拒绝深研，请不依赖外部资料作答。
     - aborted: 深研因网络问题中止，请稍后重试。
     """
-    dlog(
-        "research",
-        "research_agent_node",
-        "调用 RESEARCH 子图（模块级实例，继承父图 checkpointer）",
-    )
-    slog("research", "research_agent_node", "进入节点")
+    dlog("research", "research_agent_node", "进入节点")
 
-    # ── 提取 gap_topic（从主图 LLM 的 tool_call 参数）与真实 tool_call_id ──
-    messages = state.get("messages", [])
-    gap_topic = ""
-    tool_call_id = "research_agent"
-    if messages:
-        last = messages[-1]
-        tcs = getattr(last, "tool_calls", []) or []
-        for tc in tcs:
-            if tc.get("name") == "research_agent":
-                gap_topic = str(tc.get("args", {}).get("gap_topic", ""))
-                tool_call_id = str(tc.get("id", tool_call_id))
-                break
+    # ── 提取 gap_topic（从 Send arg 的 tool_call）与真实 tool_call_id ──
+    tc: dict[str, Any] = state.get("tool_call", {}) or {}
+    args = tc.get("args", {}) or {}
+    gap_topic = str(args.get("gap_topic", ""))
+    tool_call_id = str(tc.get("id", "research_agent"))
 
     dlog(
         "research",
@@ -101,7 +88,6 @@ async def research_agent_node(
         gap_topic=gap_topic,
         tool_call_id=tool_call_id,
     )
-    slog("research", "research_agent_node", "调用 RESEARCH 子图", gap_topic=gap_topic)
 
     # ── 调用子图（interrupt 时透传 GraphInterrupt） ──
     try:
@@ -112,7 +98,6 @@ async def research_agent_node(
             "research_agent_node",
             "子图 interrupt，透传 GraphInterrupt（主图将挂起）",
         )
-        slog("research", "research_agent_node", "子图 interrupt，透传 GraphInterrupt")
         raise
 
     dlog(
@@ -123,7 +108,6 @@ async def research_agent_node(
         if isinstance(result, dict)
         else type(result).__name__,
     )
-    slog("research", "research_agent_node", "RESEARCH 子图正常完成")
 
     # ── 据 approval_status 产反馈: 一条 ToolMessage 响应主图 tool_call + 一条 SystemMessage ──
     approval = result.get("approval_status", "approved")
