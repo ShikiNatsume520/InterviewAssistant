@@ -22,14 +22,10 @@ class ResumeState(TypedDict, total=False):
     """简历优化子图的图状态。
 
     输入层（由主图 wrapper 灌入）：
-        intent: 主图 chat_node 精炼的修改 query（更有条理的优化意图）。
-            wrapper 灌入，select_resume_node 的 interrupt payload 据此带出给主页，
-            主页跳转 /resume 时走 URL 传前端作右栏首条消息。
-        resume_shot: 当前简历文本（markdown 字符串）。由前端经 select_resume_node
-            的 interrupt 回传，wrapper 不灌此字段。approve 命中后即时替换，chat_node
-            每次都能看到最新 shot（即便半波出错退出，已批准的已替换）。
-        resume_file: 选定的简历文件名。由前端经 select_resume_node 回传，persist
-            时不写文件（最终 shot 经 done 回复返前端）。
+        resume_id/source_display_name: 已完成归属校验的只读源简历标识。
+        user_request: 可选的最小用户诉求。
+        resume_session_id: 保存派生简历使用的稳定幂等键。
+        resume_shot: 从源正文复制的工作草稿，批准修改后即时替换。
 
     运行期：
         plan: plan_node 产出的修改计划（步骤列表），作 chat_node 决策参考。
@@ -50,12 +46,17 @@ class ResumeState(TypedDict, total=False):
     推前端 token（ns=resume_agent），interrupt payload 不带 LLM 文本。
     """
 
-    intent: str
+    resume_id: str
+    source_display_name: str
+    user_request: str | None
+    resume_session_id: str
     resume_shot: str
-    resume_file: str
     plan: list[str]
     last_summary: str
     save: bool
+    outcome: str
+    output_resume_id: str | None
+    output_display_name: str | None
     processed_edits: list[str]
     approve_decision: str
     messages: Annotated[list[BaseMessage], add_messages]

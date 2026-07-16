@@ -81,8 +81,8 @@ def test_threads_are_owner_scoped_and_active_task_is_principal_scoped(
         with pytest.raises(ActiveTaskConflict):
             store.delete_thread(alice, first.id)
 
-        store.release_task(alice, "task-1", status="interrupted")
-        assert store.require_thread(alice, first.id).status == "interrupted"
+        store.release_task(alice, "task-1", status="waiting")
+        assert store.require_thread(alice, first.id).status == "waiting"
         store.delete_thread(alice, first.id)
         with pytest.raises(AccessDenied):
             store.require_thread(alice, first.id)
@@ -107,3 +107,23 @@ def test_restart_releases_stale_task_for_checkpoint_resume(tmp_path: Path) -> No
         recovered_store.acquire_task(principal, thread.id, "resume-task")
     finally:
         recovered_store.close()
+
+
+def test_thread_agent_activity_is_persisted(tmp_path: Path) -> None:
+    store = IdentityThreadStore(tmp_path / "app.sqlite")
+    try:
+        principal = store.create_guest_session().principal
+        thread = store.create_thread(principal, "简历修改")
+        assert thread.active_mode == "chat"
+        assert thread.active_agent == "main"
+
+        active = store.set_agent_activity(
+            principal,
+            thread.id,
+            active_mode="resume",
+            active_agent="resume",
+        )
+        assert active.active_mode == "resume"
+        assert active.active_agent == "resume"
+    finally:
+        store.close()

@@ -3,10 +3,9 @@
 核心范式：**流式 token（namespace 区分）+ 流后 aget_state 查 interrupt**。chat_node
 的文本回复由 ``astream(stream_mode="messages", subgraphs=True)`` 实时推前端 token
 （主图 ns=main、resume 子图 ns=resume_agent），**不存 state、不进 payload**。interrupt
-信号是流终止后用 ``aget_state`` 查 ``task.interrupts[].value`` 得到。intent 由 wrapper
-灌入 state，select_resume 的 payload 带出给主页（走 URL 传 /resume）。后端不碰文件 IO：
-select_resume 不读文件（用前端回传的 ``{resume_file, resume_shot}``），persist 不写文件
-（最终 shot 经 done 回复返前端）。
+信号是流终止后用 ``aget_state`` 查 ``task.interrupts[].value`` 得到。wrapper 按可信
+``user_id + resume_id`` 读取只读源简历并初始化工作草稿；persist 只在待命节点收到
+保存退出后创建新的幂等派生简历，绝不覆盖源简历。
 
 ``chat_node`` 是唯一 LLM 决策点，bind ``request_plan`` / ``grep_replace`` 两个
 动作工具，据用户请求自主决策：
@@ -16,8 +15,7 @@ select_resume 不读文件（用前端回传的 ``{resume_file, resume_shot}``�
 
 拓扑::
 
-    START → select_resume_node(interrupt: 等前端回传 {resume_file, resume_shot})
-          → init_node(入口哨兵)
+    START → init_node(wrapper 已加载源简历)
           → chat_node  ★ 唯一 LLM 决策点（文本走流式 token，不存 state）
               ├─ grep_replace(一波多个) → edit_executor ⟷ approve_node  (逐条小循环)
               │     edit_executor（取一条，只判断不替换）:
@@ -33,7 +31,7 @@ select_resume 不读文件（用前端回传的 ``{resume_file, resume_shot}``�
               │                                └─ approve → chat_node
               └─ 无 tool_call → hitl_standby(interrupt)
                                   ├─ new_request(+selection) → chat_node
-                                  ├─ exit(save=True)  → persist_node(不写文件) → END
+                                  ├─ exit(save=True)  → persist_node(创建派生简历) → END
                                   └─ exit(save=False) → END
 
 机制要点（phase15 验证：interrupt 透传 + Command(resume) 穿透 + subgraphs=True 子图
@@ -45,9 +43,7 @@ token 冒泡 + 主图嵌套子图）：
   逐条推进。chat_node 新发一波是新 AIMessage（新 id），自动覆盖旧波未执行的。
 - hitl_standby 路由三态：new_request（注入 HumanMessage）→chat_node；exit(save=True)
   →persist；exit(save=False)→END。靠「是否注入 HumanMessage」+「save」区分，无额外 flag。
-- select_resume 仅挂起等前端回传 ``{resume_file, resume_shot}``，**不扫不读文件**；
-  persist 仅作 END 前哨，**不写文件**。文件读写全在前端（选单个 .md 文件上传）。
-- 各中断 payload 只带业务字段（intent/before/after/edits/plan/summary），不带 chat_node
+- 各中断 payload 只带业务字段（before/after/edits/plan/summary），不带 chat_node
   文本——文本由 astream 流式 token 推前端。
 - 子图无长期记忆：每次进入状态全重置，wrapper 用主图 thread 调用（interrupt 期间状态
   在主图 checkpoint 的子图命名空间持久化）。
@@ -60,6 +56,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
@@ -75,11 +72,10 @@ from kernel.contracts import (
     PlanConfirmPayload,
     ResumeApprovePayload,
     ResumeHitlPayload,
-    ResumeSelectInbound,
-    ResumeSelectPayload,
 )
 from kernel.llm import get_chat_model
 from kernel.logging import dlog
+from kernel.resumes import ResumeRepository
 
 # --------------------------------------------------------------------------- #
 # 动作工具：request_plan（仅作路由信号，被路由拦截，不进 ToolNode）
@@ -97,44 +93,38 @@ def request_plan() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# select_resume（头部挂起选简历） / persist（尾部哨兵）
+# 派生简历持久化
 # --------------------------------------------------------------------------- #
 
 
-def select_resume_node(state: ResumeState) -> dict[str, Any]:
-    """头部挂起：interrupt 等前端回传 ``{resume_file, resume_shot}``。
-
-    后端驱动范式：本节点**不扫不读文件**——前端用 webkitdirectory 扫本地目录读
-    文件后，把 ``{resume_file, resume_shot}`` 回传。payload 最小化，仅带 ``intent``
-    （主图精炼的 query，供主页跳转 /resume 走 URL 传前端）。chat_node 文本不进
-    payload（流式 token 实时推前端）。
-
-    收到 resume 值后直接取 ``resume_shot`` / ``resume_file`` 灌入 state。
-    """
-    intent = str(state.get("intent", ""))
-    dlog("resume", "select_resume_node", "interrupt 等待前端回传简历", intent=intent)
-    value = interrupt(ResumeSelectPayload(intent=intent).model_dump())
-    dlog("resume", "select_resume_node", "收到前端回传", value=value)
-    # server 已归一化为 {action:"select", resume_file, resume_shot}，schema 校验后取字段
-    inbound = ResumeSelectInbound.model_validate(
-        value if isinstance(value, dict) else {}
+def persist_node(state: ResumeState, config: RunnableConfig) -> dict[str, Any]:
+    """把最终工作草稿幂等保存为新简历，绝不覆盖源简历。"""
+    configurable = config.get("configurable", {})
+    principal_id = str(configurable.get("user_id", ""))
+    if not principal_id:
+        raise RuntimeError("resume persist missing user_id")
+    repository = ResumeRepository()
+    try:
+        derived = repository.create_derived(
+            principal_id,
+            state["resume_id"],
+            state.get("resume_shot", ""),
+            state["resume_session_id"],
+        )
+    finally:
+        repository.close()
+    dlog(
+        "resume",
+        "persist_node",
+        "派生简历保存完成",
+        source_resume_id=state["resume_id"],
+        output_resume_id=derived.id,
     )
     return {
-        "resume_shot": inbound.resume_shot,
-        "resume_file": inbound.resume_file,
+        "outcome": "saved",
+        "output_resume_id": derived.id,
+        "output_display_name": derived.display_name,
     }
-
-
-def persist_node(state: ResumeState) -> dict[str, Any]:
-    """尾部哨兵：**不写文件**，仅作 END 前哨。
-
-    仅在 ``hitl_standby`` 收到 ``save=True`` 退出信号时经路由进入本节点。
-    ``save=False`` 直接 END。最终 ``resume_shot`` 已在 state，由 wrapper 经主图反馈 +
-    后端 ``done`` 回复返前端，**前端负责写回用户本地**（后端不知用户本地路径）。
-    """
-    shot = state.get("resume_shot", "")
-    dlog("resume", "persist_node", "哨兵节点（不写文件）", shot_len=len(shot))
-    return {}
 
 
 # --------------------------------------------------------------------------- #
@@ -143,18 +133,17 @@ def persist_node(state: ResumeState) -> dict[str, Any]:
 
 
 def init_node(state: ResumeState) -> dict[str, Any]:
-    """入口哨兵：select_resume → init → chat_node。
+    """入口哨兵：wrapper 已加载源简历并初始化工作草稿。
 
     新设计逐条 approve，无整波撤销概念，不再需要 ``last_shot`` 快照。本节点仅记录
-    日志，不修改 state。``resume_shot``/``resume_file`` 由 select_resume 灌入，
-    首条 HumanMessage 由 wrapper 灌入 messages。
+    日志，不修改 state。首条 HumanMessage 由 wrapper 按可选 user_request 灌入。
     """
     dlog(
         "resume",
         "init_node",
         "进入会话",
         resume_len=len(state.get("resume_shot", "")),
-        resume_file=state.get("resume_file", ""),
+        resume_id=state.get("resume_id", ""),
         msgs_n=len(state.get("messages", [])),
     )
     return {}
@@ -356,6 +345,8 @@ def _collect_pending_edits(state: ResumeState) -> list[dict[str, str]]:
                         "id": str(tc.get("id", "")),
                         "grep_target": str(args.get("grep_target", "")),
                         "replace_content": str(args.get("replace_content", "")),
+                        "section": str(args.get("section", "")),
+                        "reason": str(args.get("reason", "")),
                     }
                 )
             return edits
@@ -485,6 +476,9 @@ def approve_node(state: ResumeState) -> dict[str, Any]:
             replace_content=current["replace_content"],
         )
     ]
+    all_edits = _collect_pending_edits(state)
+    processed = set(state.get("processed_edits", []) or [])
+    ordinal = sum(1 for edit in all_edits if edit["id"] in processed) + 1
     dlog(
         "resume",
         "approve_node",
@@ -493,7 +487,18 @@ def approve_node(state: ResumeState) -> dict[str, Any]:
         after_len=len(after),
     )
     value = interrupt(
-        ResumeApprovePayload(before=before, after=after, edits=edits).model_dump()
+        ResumeApprovePayload(
+            edit_id=current["id"],
+            ordinal=ordinal,
+            total=max(len(all_edits), 1),
+            section=current["section"],
+            reason=current["reason"],
+            before_text=current["grep_target"],
+            after_text=current["replace_content"],
+            before=before,
+            after=after,
+            edits=edits,
+        ).model_dump()
     )
     dlog("resume", "approve_node", "收到用户回复", value=value)
     preview = current["grep_target"][:50] + (
@@ -556,7 +561,10 @@ def hitl_standby_node(state: ResumeState) -> dict[str, Any]:
     # server 已归一化为 {action: new_request|exit, request?, selection?, save?}
     inbound = HitlInbound.model_validate(value if isinstance(value, dict) else {})
     if inbound.action == "exit":
-        return {"save": inbound.save}
+        return {
+            "save": inbound.save,
+            "outcome": "saved" if inbound.save else "discarded",
+        }
     # new_request：注入用户新请求作 HumanMessage（可带选区 selection 作位置提示）
     request = inbound.request
     selection = inbound.selection
@@ -591,7 +599,6 @@ def build_resume_workflow() -> Any:
     checkpointer（与 rag_agent 一致）。
     """
     workflow = StateGraph(ResumeState)
-    workflow.add_node("select_resume", select_resume_node)
     workflow.add_node("init", init_node)
     workflow.add_node("chat_node", chat_node)
     workflow.add_node("plan_node", plan_node)
@@ -601,8 +608,7 @@ def build_resume_workflow() -> Any:
     workflow.add_node("hitl_standby", hitl_standby_node)
     workflow.add_node("persist", persist_node)
 
-    workflow.set_entry_point("select_resume")
-    workflow.add_edge("select_resume", "init")
+    workflow.set_entry_point("init")
     workflow.add_edge("init", "chat_node")
     workflow.add_conditional_edges(
         "chat_node",

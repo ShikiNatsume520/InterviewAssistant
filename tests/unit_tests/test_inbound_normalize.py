@@ -1,12 +1,12 @@
 """inbound resume 归一化 + schema 校验单测。
 
-覆盖 ``normalize_resume_value`` 把旧前端裸串 / 旧 dict 归一化为规范
-``{action, ...}`` dict，以及 ``PHASE_TO_INBOUND`` schema 校验。重点验证
-**旧 static/ 前端形态**与**新 React 规范形态**两条路径都能正确归一化。
+覆盖 ``normalize_resume_value`` 把兼容输入归一化为规范 ``{action, ...}``
+dict，以及 ``PHASE_TO_INBOUND`` schema 校验。
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +16,7 @@ from kernel.contracts import (
     PHASE_TO_INBOUND,
     normalize_resume_value,
 )
+from server import app as server_app
 
 
 def _normalize_and_validate(phase: str, value: object) -> dict[str, Any]:
@@ -25,33 +26,35 @@ def _normalize_and_validate(phase: str, value: object) -> dict[str, Any]:
     return schema.model_validate(normalized).model_dump()
 
 
-# ── resume_select：旧 {resume_file, resume_shot}（无 action）→ 规范 ────────
-
-
-def test_resume_select_legacy_dict_normalized() -> None:
-    """旧 resume 页发 {resume_file, resume_shot}（无 action）→ 补 action:select。"""
-    out = _normalize_and_validate(
-        "resume_select",
-        {"resume_file": "r.md", "resume_shot": "# 简历"},
+def test_resume_interrupt_product_payload_contains_recoverable_workspace() -> None:
+    payload = server_app._interrupt_payload(
+        [
+            SimpleNamespace(
+                value={
+                    "phase": "resume_approve",
+                    "edit_id": "edit-1",
+                    "ordinal": 1,
+                    "total": 2,
+                    "section": "项目经历",
+                    "reason": "突出架构能力",
+                    "before_text": "旧描述",
+                    "after_text": "新描述",
+                    "before": "# 项目\n旧描述",
+                    "after": "# 项目\n新描述",
+                    "edits": [],
+                }
+            )
+        ],
+        {
+            "resumeId": "resume-1",
+            "displayName": "Agent 简历",
+            "draft": "# 项目\n旧描述",
+        },
     )
-    assert out == {
-        "action": "select",
-        "resume_file": "r.md",
-        "resume_shot": "# 简历",
-    }
-
-
-def test_resume_select_new_dict_idempotent() -> None:
-    """新 React 规范 dict（带 action）→ 原样透传。"""
-    out = _normalize_and_validate(
-        "resume_select",
-        {"action": "select", "resume_file": "r.md", "resume_shot": "# 简历"},
-    )
-    assert out == {
-        "action": "select",
-        "resume_file": "r.md",
-        "resume_shot": "# 简历",
-    }
+    interrupt = payload["interrupts"][0]
+    assert interrupt["edit_id"] == "edit-1"
+    assert interrupt["workspace"]["resumeId"] == "resume-1"
+    assert interrupt["workspace"]["draft"] == "# 项目\n旧描述"
 
 
 # ── 决策类：裸串 / 旧 {decision} / 新 {action} ────────────────────────────

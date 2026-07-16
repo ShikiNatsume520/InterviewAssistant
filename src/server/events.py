@@ -19,6 +19,7 @@ EventType = Literal[
     "tool.status",
     "interrupt.requested",
     "interrupt.resolved",
+    "resume.result",
     "task.started",
     "task.status",
     "task.completed",
@@ -105,6 +106,46 @@ class ProductEventStore:
                 ON product_events(thread_id, sequence);
                 """
             )
+            schema_row = self._connection.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'product_events'"
+            ).fetchone()
+            if schema_row is not None and "threads_legacy" in str(schema_row["sql"]):
+                self._repair_thread_foreign_key()
+
+    def _repair_thread_foreign_key(self) -> None:
+        """修复旧版 Thread 表迁移遗留的 product_events 外键目标。"""
+        self._connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            BEGIN IMMEDIATE;
+            ALTER TABLE product_events RENAME TO product_events_legacy;
+            DROP INDEX IF EXISTS idx_product_events_thread_sequence;
+            CREATE TABLE product_events (
+                event_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                task_id TEXT,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                UNIQUE(thread_id, sequence)
+            );
+            INSERT INTO product_events(
+                event_id, thread_id, sequence, task_id, event_type,
+                source, occurred_at, payload_json
+            )
+            SELECT event_id, thread_id, sequence, task_id, event_type,
+                   source, occurred_at, payload_json
+            FROM product_events_legacy;
+            DROP TABLE product_events_legacy;
+            CREATE INDEX idx_product_events_thread_sequence
+            ON product_events(thread_id, sequence);
+            COMMIT;
+            PRAGMA foreign_keys = ON;
+            """
+        )
 
     def append(
         self,

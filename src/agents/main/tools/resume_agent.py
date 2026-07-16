@@ -1,19 +1,13 @@
 """resume_agent 子智能体：Tool 定义 + 包装节点函数。
 
-阶段4（常驻编辑会话改造完成）：wrapper 退化为**纯透传**——子图自包含读写
-（``select_resume_node`` 选读、``persist_node`` 写回），wrapper 不碰文件 IO。
+阶段 4B：wrapper 负责按可信身份读取只读源简历，并把工作草稿交给子图；
+子图保存退出时创建新的派生简历，放弃退出不写资源库。
 
 职责：
-- 从主图 tool_call args 读 ``intent``（主图精炼的修改意图）。
-- 灌 ``messages=[HumanMessage(intent)]`` 作为首条用户请求（决策 A：首条请求统一
-  为 HumanMessage，resume chat_node 从 messages 读需求；前端直连时由前端传用户输入）。
-- 透传 ``selection``（可选，前端直连唤醒时带；主图激活路径无选区）。
-- ``ainvoke`` resume 子图（子图头部 select_resume 自己选简历、尾部 persist 自己写回）。
-- 子图完成后据 ``result.last_summary`` 产反馈 ``ToolMessage`` + ``SystemMessage``，
-  并回填 ``current_resume``（最终草稿）。
-
-简历选择（读哪份）由子图头部 ``select_resume_node`` 经 interrupt 让前端选，
-**子图/LLM 不碰路径解析**——主图只传 intent，不传 resume_file。
+- 从 tool_call 读取最小交接 ``resume_id + user_request?``。
+- 从 RunnableConfig 取得 user/thread 身份，校验归属并读取源正文。
+- 用稳定 resume_session_id 初始化子图，使保存 checkpoint 重跑保持幂等。
+- 子图完成后只返回结构化结果，不把完整草稿塞回 Main Agent上下文。
 
 与 ``rag_agent`` 的集成方式一致：
 
@@ -25,7 +19,7 @@
 子图作为模块级实例被 wrapper 函数体直接引用，``find_subgraph_pregel`` 的 AST
 闭包分析可发现它 → ``PregelNode.subgraphs`` 被填充 → Studio 可展开子图内部节点。
 
-resume 子图内部用 ``interrupt()`` 挂起（select_resume / plan_confirm / approve /
+resume 子图内部用 ``interrupt()`` 挂起（plan_confirm / approve /
 hitl_standby）。子图 ainvoke 会抛 ``GraphInterrupt``，wrapper 必须透传该异常让主图
 线程也暂停；下一轮主图 ``Command(resume=...)`` 会精准恢复到子图挂起点（checkpointer
 由父图继承，子图状态持久化在共享命名空间）。
@@ -33,9 +27,10 @@ hitl_standby）。子图 ainvoke 会抛 ``GraphInterrupt``，wrapper 必须透�
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
@@ -43,25 +38,30 @@ from pydantic import Field
 
 from agents.resume.graph import graph as resume_graph
 from kernel.logging import dlog
+from kernel.resumes import ResumeRepository
 
 
 @tool
 def resume_agent(
-    intent: str = Field(
+    resume_id: str = Field(
         description=(
-            "用户修改简历的需求描述。由你（主图 LLM）据上下文把用户的简历修改消息"
-            "整理扩充成更有条理的优化 query（例如把「把学校改一下」整理成「用户希望"
-            "修改教育经历中的校名」），而非详细计划。不要塞入整段简历——具体改哪份"
-            "简历由系统进入简历优化后请用户选择。"
+            "要修改的源简历 ID，必须来自 list_resumes、search_resumes、read_resume "
+            "或系统提供的已验证 ID，禁止编造。源简历只读。"
         )
+    ),
+    user_request: str | None = Field(
+        default=None,
+        description=(
+            "用户原始修改诉求或忠实的简短概括，可为空。不要为了填充该字段过度追问，"
+            "不要生成详细计划或塞入整份简历。"
+        ),
     ),
 ) -> str:
     """进入简历优化模式，按用户意图对简历进行多轮修改并请你确认。
 
     适用场景：用户明确要求"优化简历""改简历""补充项目经历"等修改简历的意图。
-    调用后系统会进入常驻编辑会话：先请你选择要修改的简历，然后你可制定修改计划
-    请用户确认，或直接做修改后请用户批准；完成前会一直停留在会话中，直到前端发送
-    结束信号（保存或放弃）。
+    调用后系统读取指定源简历并进入常驻编辑会话；信息不足时由 Resume Agent结合
+    简历内容继续询问。保存退出创建新的派生简历，放弃退出不创建资源。
 
     不要在普通知识问答场景调用此工具——知识检索请用 ``rag_agent``。
     """
@@ -73,46 +73,58 @@ def resume_agent(
 async def resume_agent_node(
     state: dict[str, Any], config: RunnableConfig
 ) -> dict[str, Any]:
-    """异步 resume_agent 包装节点（纯透传）。
+    """异步 resume_agent 包装节点。
 
     由 ``route_after_chat`` 经 ``Send("resume_agent", {"tool_call": tc})`` 调用，
-    从 Send arg 读取本节点负责的单个 tool_call（含 ``intent`` / ``id``）。
+    从 Send arg 读取本节点负责的单个 tool_call。
 
-    流程：
-    1. 从 args 读 ``intent``（主图精炼的 query）→ 包成首条 HumanMessage 灌入 messages，
-       同时把 ``intent`` 灌入子图 state——select_resume 的 interrupt payload 据此带出
-       给主页，主页跳转 /resume 时走 URL 传前端作右栏首条消息。
-    2. ``ainvoke`` resume 子图——子图头部 ``select_resume`` 等前端回传简历、尾部
-       ``persist`` 不写文件（最终 shot 经 done 回复返前端），wrapper 不碰文件 IO。
-    3. 据 ``result.last_summary`` 产反馈 ToolMessage + SystemMessage，回填
-       ``current_resume``（最终草稿）。
+    wrapper 校验并读取源简历，初始化工作草稿；子图退出后返回最小结构化结果。
     """
     dlog("resume", "resume_agent_node", "进入节点")
 
     tc: dict[str, Any] = state.get("tool_call", {}) or {}
     args = tc.get("args", {}) or {}
-    intent = str(args.get("intent", ""))
+    resume_id = str(args.get("resume_id", "")).strip()
+    raw_request = args.get("user_request")
+    user_request = str(raw_request).strip() if raw_request is not None else None
+    if user_request == "":
+        user_request = None
     tool_call_id = str(tc.get("id", "resume_agent"))
+    configurable = config.get("configurable", {})
+    principal_id = str(configurable.get("user_id", ""))
+    thread_id = str(configurable.get("thread_id", ""))
+    if not principal_id or not resume_id:
+        raise RuntimeError("resume_agent missing trusted user_id or resume_id")
 
-    # 首条用户请求：主图激活时用 intent 生成 HumanMessage（决策 A）。同时把 intent
-    # 灌入子图 state——select_resume_node 的 interrupt payload 据此带出给主页，
-    # 主页跳转 /resume 时走 URL 传前端作右栏首条消息。
-    initial_messages: list[Any] = [HumanMessage(content=intent)] if intent else []
+    repository = ResumeRepository()
+    try:
+        source = repository.require(principal_id, resume_id)
+    finally:
+        repository.close()
+
+    # 可选诉求作为 Resume Agent 的首条用户消息；为空时由其读取简历后主动询问。
+    initial_messages: list[Any] = (
+        [HumanMessage(content=user_request)] if user_request else []
+    )
     invoke_input: dict[str, Any] = {
         "messages": initial_messages,
-        "intent": intent,
+        "resume_id": source.id,
+        "source_display_name": source.display_name,
+        "user_request": user_request,
+        "resume_session_id": f"resume:{principal_id}:{thread_id}:{tool_call_id}",
+        "resume_shot": source.content,
     }
 
     dlog(
         "resume",
         "resume_agent_node",
         "调用 RESUME 子图",
-        intent=intent,
+        resume_id=resume_id,
+        has_user_request=user_request is not None,
         tool_call_id=tool_call_id,
     )
 
     # ── 调用子图（interrupt 时透传 GraphInterrupt） ──
-    # resume_shot / resume_file 由子图内部 select_resume/persist 管理，wrapper 不灌。
     try:
         result = await resume_graph.ainvoke(invoke_input, config)
     except GraphInterrupt:
@@ -132,15 +144,25 @@ async def resume_agent_node(
         else type(result).__name__,
     )
 
-    final_shot = str(result.get("resume_shot", ""))
-    summary = str(result.get("last_summary", "")) or intent or "简历优化完成。"
-    feedback = f"【系统反馈】{summary}"
-    out_msgs: list[Any] = [
-        ToolMessage(content=feedback, tool_call_id=tool_call_id),
-        SystemMessage(content=feedback),
-    ]
+    outcome = str(result.get("outcome", "discarded"))
+    output_resume_id = result.get("output_resume_id")
+    output_display_name = result.get("output_display_name")
+    summary = (
+        str(result.get("last_summary", ""))
+        or user_request
+        or ("简历修改已保存。" if outcome == "saved" else "用户已放弃本轮修改。")
+    )
+    feedback = json.dumps(
+        {
+            "source_resume_id": source.id,
+            "output_resume_id": output_resume_id,
+            "outcome": outcome,
+            "summary": summary,
+            "display_name": output_display_name or source.display_name,
+        },
+        ensure_ascii=False,
+    )
 
     return {
-        "messages": out_msgs,
-        "current_resume": final_shot,
+        "messages": [ToolMessage(content=feedback, tool_call_id=tool_call_id)],
     }

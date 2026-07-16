@@ -43,6 +43,13 @@ class ResumeApprovePayload(BaseModel):
     """``resume_agent`` 常驻会话 ``approve_node`` interrupt payload。"""
 
     phase: Literal["resume_approve"] = "resume_approve"
+    edit_id: str = Field(default="", description="稳定 tool_call_id")
+    ordinal: int = Field(default=1, ge=1, description="当前候选序号")
+    total: int = Field(default=1, ge=1, description="当前批次候选总数")
+    section: str = Field(default="", description="展示章节或位置")
+    reason: str = Field(default="", description="修改理由")
+    before_text: str = Field(default="", description="当前定位原文")
+    after_text: str = Field(default="", description="候选替换文本")
     before: str = Field(default="", description="修改波前草稿")
     after: str = Field(default="", description="修改波后草稿")
     edits: list[GrepReplaceItem] = Field(
@@ -56,19 +63,6 @@ class ResumeHitlPayload(BaseModel):
 
     phase: Literal["resume_hitl"] = "resume_hitl"
     summary: str = Field(default="", description="chat_node 产出的本次会话总结")
-
-
-class ResumeSelectPayload(BaseModel):
-    """``resume_agent`` 常驻会话 ``select_resume_node`` interrupt payload。
-
-    后端驱动范式：select_resume 仅挂起等前端回传 ``{resume_file, resume_shot}``，
-    **不扫不读文件**——前端用 webkitdirectory 扫本地目录读文件。payload 最小化，
-    仅带 ``intent``（主图精炼的 query）供主页跳转 /resume 时走 URL 传前端作右栏
-    首条消息。chat_node 文本不进 payload（流式 token 实时推前端）。
-    """
-
-    phase: Literal["resume_select"] = "resume_select"
-    intent: str = Field(default="", description="主图精炼的修改 query，带出给主页")
 
 
 class OutlineConfirmPayload(BaseModel):
@@ -100,18 +94,6 @@ class ConnectivityCheckPayload(BaseModel):
 # select 等非"决策"语义（hitl 已在用），全 phase 统一最自然。
 
 
-class ResumeSelectInbound(BaseModel):
-    """``resume_select`` 的 inbound：前端选简历文件后回传。
-
-    旧前端发 ``{resume_file, resume_shot}``（无 ``action``），server 归一化补
-    ``action: "select"``。
-    """
-
-    action: Literal["select"]
-    resume_file: str = Field(default="", description="选定的简历文件名")
-    resume_shot: str = Field(default="", description="简历全文（markdown 字符串）")
-
-
 class DecisionInbound(BaseModel):
     """决策类 inbound：``approve`` / ``reject`` / ``suggest``。
 
@@ -141,7 +123,6 @@ class ConnectivityInbound(BaseModel):
 
 
 PHASE_TO_INBOUND: dict[str, type[BaseModel]] = {
-    "resume_select": ResumeSelectInbound,
     "resume_approve": DecisionInbound,
     "plan_confirm": DecisionInbound,
     "outline_confirm": DecisionInbound,
@@ -167,18 +148,6 @@ def normalize_resume_value(phase: str, value: Any) -> Any:
     """
     if phase not in PHASE_TO_INBOUND:
         return value
-
-    # resume_select：旧形态 {resume_file, resume_shot}（无 action）
-    if phase == "resume_select":
-        if isinstance(value, dict):
-            if value.get("action") == "select":
-                return value
-            return {
-                "action": "select",
-                "resume_file": str(value.get("resume_file", "")),
-                "resume_shot": str(value.get("resume_shot", "")),
-            }
-        return {"action": "select", "resume_file": "", "resume_shot": str(value)}
 
     # 决策类：resume_approve / plan_confirm / outline_confirm
     if phase in ("resume_approve", "plan_confirm", "outline_confirm"):

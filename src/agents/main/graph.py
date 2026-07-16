@@ -31,6 +31,7 @@ from agents.main.prompts import SYSTEM_PROMPT
 from agents.main.registry import REGISTRY
 from agents.main.routing import route_after_chat
 from agents.main.state import MainState
+from agents.main.tools.resume_resources import RESUME_RESOURCE_TOOLS
 from kernel.config import CHAT_MODEL
 from kernel.llm import get_chat_model
 from kernel.logging import dlog, summarize_messages
@@ -40,7 +41,7 @@ from kernel.persistence import get_store
 # 工具列表（后续新增子图时扩展）
 # --------------------------------------------------------------------------- #
 
-BASIC_TOOLS: list[Any] = []
+BASIC_TOOLS: list[Any] = [*RESUME_RESOURCE_TOOLS]
 """普通工具列表（直接由 ToolNode 执行，无需包装节点拦截）。"""
 
 ALL_TOOLS: list[Any] = BASIC_TOOLS + [m["tool"] for m in REGISTRY]

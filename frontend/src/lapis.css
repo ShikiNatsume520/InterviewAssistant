@@ -1,0 +1,20 @@
+@font-face { font-family: "LapisSourceHanSans"; src: url("/v1/lapis-assets/SourceHanSansCN-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "LapisSourceHanSans"; src: url("/v1/lapis-assets/SourceHanSansCN-Medium.ttf"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "LapisSourceHanSerif"; src: url("/v1/lapis-assets/SourceHanSerifCN-Bold.ttf"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "LapisJetBrainsMono"; src: url("/v1/lapis-assets/JetBrainsMono-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "LapisCV Icon"; src: url("/v1/lapis-assets/iconfont.ttf"); font-display: swap; }
+
+.lapis-preview { --accent:#4870ad; width:210mm; min-height:297mm; margin:0 auto; padding:10mm 20mm 25mm; background:#fff; color:#353a42; box-shadow:0 0 4mm #8293aa42; font:9.5pt/1.8 "LapisCV Icon","LapisSourceHanSans",sans-serif; }
+.lapis-preview h1,.lapis-preview h2,.lapis-preview h3 { font-family:"LapisCV Icon","LapisSourceHanSerif",serif; font-weight:700; }
+.lapis-preview h1 { margin:3mm 1mm 0; padding-top:1mm; border:0; color:#353a42; font-size:25pt; line-height:1.5; }
+.lapis-preview h2 { margin:2.4mm 0 1.9mm!important; padding:1.2mm 0; border-bottom:1px solid #a2b6d4; color:var(--accent); font-size:13pt; line-height:1; }
+.lapis-preview h3,.lapis-preview h4 { margin:0; color:#353a42; font-size:11pt; line-height:1.8; }
+.lapis-preview p,.lapis-preview li { margin:0; font-size:9.5pt; line-height:1.8; }
+.lapis-preview strong { color:#121418; }.lapis-preview a { color:var(--accent); text-decoration:none; font-family:"LapisJetBrainsMono",monospace; }.lapis-preview code { background:#fff; color:#353a42; font:9.5pt "LapisJetBrainsMono",monospace; }
+.lapis-preview blockquote { margin:0 1mm 6mm; padding:0; border:0; background:transparent; }.lapis-preview blockquote p { font-size:9.3pt; line-height:1.5; }
+.lapis-preview ul { margin:0; padding-inline:3mm 1mm; list-style-type:'\2022'; }.lapis-preview ol { margin:0; padding-inline:5mm 1mm; }.lapis-preview li { padding-left:1.5mm; }
+.lapis-preview .entry-title,.lapis-preview div[alt="entry-title"] { display:flex; justify-content:space-between; align-items:center; }
+.lapis-preview .icon,.lapis-preview span[alt="icon"] { color:var(--accent); }
+.lapis-preview .avatar,.lapis-preview img[alt="avatar"] { position:relative; z-index:1; float:right; width:24mm; height:24mm; object-fit:cover; overflow:hidden; margin:-29mm 0 0 3mm; border:0; border-radius:50%; box-shadow:none; }
+.lapis-preview p:has(.avatar,img[alt="avatar"]) { height:0; padding:0; margin:0; }.lapis-preview hr { visibility:hidden; margin:0; page-break-after:always; }
+.lapis-image-placeholder { display:block; float:right; max-width:42mm; margin:-20mm 0 3mm 3mm; padding:3mm; border:1px dashed #aab4c3; color:#7d8796; font-size:8pt; }

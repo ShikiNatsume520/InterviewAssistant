@@ -38,6 +38,14 @@ def grep_replace(
     replace_content: str = Field(
         description="替换 grep_target 的新内容（可为空字符串表示删除该片段）。"
     ),
+    section: str = Field(
+        default="",
+        description="面向用户展示的简历章节或位置，例如“项目经历”。",
+    ),
+    reason: str = Field(
+        default="",
+        description="面向用户说明这项修改为何有帮助；不得编造事实。",
+    ),
 ) -> str:
     """在当前简历草稿中定位 grep_target 并用 replace_content 替换。
 

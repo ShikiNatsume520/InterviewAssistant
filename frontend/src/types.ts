@@ -9,9 +9,25 @@ export interface Identity {
 export interface ThreadRecord {
   id: string;
   title: string;
-  status: "idle" | "running" | "interrupted";
+  status: "idle" | "running" | "waiting" | "interrupted";
   created_at: string;
   updated_at: string;
+  selected_resume_id: string | null;
+  active_mode: "chat" | "resume";
+  active_agent: "main" | "resume";
+}
+
+export interface ResumeMetadata {
+  id: string;
+  original_name: string;
+  display_name: string;
+  created_at: string;
+  updated_at: string;
+  source_resume_id: string | null;
+}
+
+export interface ResumeDocument extends ResumeMetadata {
+  content: string;
 }
 
 export interface ProductEvent {
