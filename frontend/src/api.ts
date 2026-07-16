@@ -5,6 +5,8 @@ import {
   type EventPage,
   type Identity,
   type ModelConfig,
+  type ResumeDocument,
+  type ResumeMetadata,
   type StreamFrame,
   type ThreadRecord,
 } from "./types";
@@ -80,6 +82,46 @@ export function deleteThread(id: string): Promise<void> {
   return jsonRequest(`/v1/threads/${id}`, { method: "DELETE" });
 }
 
+export function selectThreadResume(threadId: string, resumeId: string | null): Promise<ThreadRecord> {
+  return jsonRequest(`/v1/threads/${threadId}/selected-resume`, {
+    method: "PUT",
+    body: JSON.stringify({ resume_id: resumeId }),
+  });
+}
+
+export function listResumes(): Promise<ResumeMetadata[]> {
+  return jsonRequest("/v1/resumes");
+}
+
+export function uploadResume(file: File): Promise<ResumeDocument> {
+  return file.text().then((content) => jsonRequest("/v1/resumes", {
+    method: "POST",
+    body: JSON.stringify({ original_name: file.name, content }),
+  }));
+}
+
+export function renameResume(id: string, displayName: string): Promise<ResumeMetadata> {
+  return jsonRequest(`/v1/resumes/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
+export function deleteResume(id: string): Promise<void> {
+  return jsonRequest(`/v1/resumes/${id}`, { method: "DELETE" });
+}
+
+export async function downloadResume(id: string, displayName: string): Promise<void> {
+  const response = await fetch(`/v1/resumes/${id}/download`, { credentials: "same-origin" });
+  if (!response.ok) throw await parseError(response);
+  const url = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = displayName.toLowerCase().endsWith(".md") ? displayName : `${displayName}.md`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export function getEvents(
   threadId: string,
   cursor?: { after?: string; before?: string },
@@ -93,6 +135,8 @@ export function getEvents(
 interface StreamOptions {
   threadId: string;
   message?: string;
+  resumeId?: string | null;
+  resumeValue?: Record<string, unknown>;
   checkpoint?: boolean;
   modelConfig: ModelConfig | null;
   signal: AbortSignal;
@@ -114,7 +158,12 @@ export async function streamGraph(options: StreamOptions): Promise<void> {
       body: JSON.stringify(
         options.checkpoint
           ? { thread_id: options.threadId }
-          : { thread_id: options.threadId, message: options.message ?? "" },
+          : {
+              thread_id: options.threadId,
+              message: options.message ?? "",
+              resume_id: options.resumeId ?? null,
+              resume_value: options.resumeValue,
+            },
       ),
     },
   );

@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Literal
 
 PrincipalKind = Literal["guest", "developer"]
-ThreadStatus = Literal["idle", "running", "interrupted"]
+ThreadStatus = Literal["idle", "running", "waiting", "interrupted"]
+ActiveMode = Literal["chat", "resume"]
+ActiveAgent = Literal["main", "resume"]
 
 GUEST_SESSION_TTL = timedelta(days=30)
 DEVELOPER_SESSION_TTL = timedelta(hours=12)
@@ -58,6 +60,9 @@ class ThreadRecord:
     status: ThreadStatus
     created_at: str
     updated_at: str
+    selected_resume_id: str | None
+    active_mode: ActiveMode
+    active_agent: ActiveAgent
 
 
 def _now() -> datetime:
@@ -129,7 +134,7 @@ class IdentityThreadStore:
                         REFERENCES principals(id) ON DELETE CASCADE,
                     title TEXT NOT NULL,
                     status TEXT NOT NULL
-                        CHECK (status IN ('idle', 'running', 'interrupted')),
+                        CHECK (status IN ('idle', 'running', 'waiting', 'interrupted')),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -147,6 +152,109 @@ class IdentityThreadStore:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(threads)").fetchall()
+            }
+            if "selected_resume_id" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE threads ADD COLUMN selected_resume_id TEXT"
+                )
+            if "active_mode" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE threads ADD COLUMN active_mode TEXT NOT NULL "
+                    "DEFAULT 'chat'"
+                )
+            if "active_agent" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE threads ADD COLUMN active_agent TEXT NOT NULL "
+                    "DEFAULT 'main'"
+                )
+            schema_row = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'"
+            ).fetchone()
+            if schema_row is not None and "'waiting'" not in str(schema_row["sql"]):
+                self._migrate_threads_for_waiting_status()
+
+    def _migrate_threads_for_waiting_status(self) -> None:
+        """扩展旧数据库的 Thread 状态约束，同时保留活动任务。"""
+        has_product_events = self._conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'product_events'"
+        ).fetchone() is not None
+        event_setup = """
+        event_copy = """
+        if has_product_events:
+            event_setup = """
+            ALTER TABLE product_events RENAME TO product_events_legacy;
+            DROP INDEX IF EXISTS idx_product_events_thread_sequence;
+            """
+            event_copy = """
+            CREATE TABLE product_events (
+                event_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                task_id TEXT,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                UNIQUE(thread_id, sequence)
+            );
+            INSERT INTO product_events(
+                event_id, thread_id, sequence, task_id, event_type,
+                source, occurred_at, payload_json
+            )
+            SELECT event_id, thread_id, sequence, task_id, event_type,
+                   source, occurred_at, payload_json
+            FROM product_events_legacy;
+            DROP TABLE product_events_legacy;
+            CREATE INDEX idx_product_events_thread_sequence
+            ON product_events(thread_id, sequence);
+            """
+        self._conn.executescript(
+            f"""
+            PRAGMA foreign_keys = OFF;
+            BEGIN IMMEDIATE;
+            {event_setup}
+            ALTER TABLE active_tasks RENAME TO active_tasks_legacy;
+            ALTER TABLE threads RENAME TO threads_legacy;
+            DROP INDEX IF EXISTS idx_threads_principal_updated;
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL
+                    CHECK (status IN ('idle', 'running', 'waiting', 'interrupted')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                selected_resume_id TEXT,
+                active_mode TEXT NOT NULL DEFAULT 'chat',
+                active_agent TEXT NOT NULL DEFAULT 'main'
+            );
+            INSERT INTO threads(
+                id, principal_id, title, status, created_at, updated_at,
+                selected_resume_id, active_mode, active_agent
+            )
+            SELECT id, principal_id, title, status, created_at, updated_at,
+                   selected_resume_id, active_mode, active_agent
+            FROM threads_legacy;
+            CREATE TABLE active_tasks (
+                principal_id TEXT PRIMARY KEY REFERENCES principals(id) ON DELETE CASCADE,
+                thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL,
+                started_at TEXT NOT NULL
+            );
+            INSERT INTO active_tasks SELECT * FROM active_tasks_legacy;
+            DROP TABLE active_tasks_legacy;
+            DROP TABLE threads_legacy;
+            {event_copy}
+            CREATE INDEX idx_threads_principal_updated
+            ON threads(principal_id, updated_at DESC);
+            COMMIT;
+            PRAGMA foreign_keys = ON;
+            """
+        )
 
     def _recover_interrupted_tasks(self) -> None:
         """启动时释放进程异常退出遗留的锁，并保留可恢复状态。"""
@@ -276,14 +384,17 @@ class IdentityThreadStore:
                 """,
                 (thread_id, principal.id, clean_title, now, now),
             )
-        return ThreadRecord(thread_id, clean_title, "idle", now, now)
+        return ThreadRecord(
+            thread_id, clean_title, "idle", now, now, None, "chat", "main"
+        )
 
     def list_threads(self, principal: Principal) -> list[ThreadRecord]:
         """列出当前 principal 的全部 Thread。"""
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT id, title, status, created_at, updated_at
+                SELECT id, title, status, created_at, updated_at,
+                       selected_resume_id, active_mode, active_agent
                 FROM threads WHERE principal_id = ?
                 ORDER BY updated_at DESC, rowid DESC
                 """,
@@ -296,7 +407,8 @@ class IdentityThreadStore:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT id, principal_id, title, status, created_at, updated_at
+                SELECT id, principal_id, title, status, created_at, updated_at,
+                       selected_resume_id, active_mode, active_agent
                 FROM threads WHERE id = ?
                 """,
                 (thread_id,),
@@ -319,6 +431,39 @@ class IdentityThreadStore:
             self._conn.execute(
                 "UPDATE threads SET title = ?, updated_at = ? WHERE id = ?",
                 (clean_title, _iso(_now()), thread_id),
+            )
+        return self.require_thread(principal, thread_id)
+
+    def select_resume(
+        self, principal: Principal, thread_id: str, resume_id: str | None
+    ) -> ThreadRecord:
+        """持久化当前 Thread 的前端指定简历。"""
+        self.require_thread(principal, thread_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE threads SET selected_resume_id = ?, updated_at = ? WHERE id = ?",
+                (resume_id, _iso(_now()), thread_id),
+            )
+        return self.require_thread(principal, thread_id)
+
+    def set_agent_activity(
+        self,
+        principal: Principal,
+        thread_id: str,
+        *,
+        active_mode: ActiveMode,
+        active_agent: ActiveAgent,
+    ) -> ThreadRecord:
+        """持久化前端接收者视图；LangGraph checkpoint 仍是执行真相。"""
+        self.require_thread(principal, thread_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE threads
+                SET active_mode = ?, active_agent = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (active_mode, active_agent, _iso(_now()), thread_id),
             )
         return self.require_thread(principal, thread_id)
 
@@ -366,7 +511,7 @@ class IdentityThreadStore:
         principal: Principal,
         task_id: str,
         *,
-        status: Literal["idle", "interrupted"],
+        status: Literal["idle", "waiting", "interrupted"],
     ) -> None:
         """释放匹配的活动任务锁，并更新 Thread 状态。"""
         with self._lock:
@@ -398,4 +543,11 @@ class IdentityThreadStore:
             status=status,
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            selected_resume_id=(
+                str(row["selected_resume_id"])
+                if row["selected_resume_id"] is not None
+                else None
+            ),
+            active_mode=row["active_mode"],
+            active_agent=row["active_agent"],
         )

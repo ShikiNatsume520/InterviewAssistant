@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,37 @@ def test_event_sequence_and_forward_backward_pagination(tmp_path: Path) -> None:
     finally:
         events.close()
         identities.close()
+
+
+def test_store_repairs_legacy_thread_foreign_key(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.sqlite"
+    identities, events, thread_id = _stores(db_path)
+    events.close()
+    identities.close()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("ALTER TABLE threads RENAME TO threads_legacy")
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'threads_legacy'"
+        ).fetchone()[0]
+        connection.execute(str(schema).replace("threads_legacy", "threads", 1))
+        connection.execute("INSERT INTO threads SELECT * FROM threads_legacy")
+        connection.execute("DROP TABLE threads_legacy")
+
+    repaired = ProductEventStore(db_path)
+    try:
+        event = repaired.append(
+            thread_id, "message.user", "user", {"content": "仍可展示"}
+        )
+        assert event.payload == {"content": "仍可展示"}
+        with sqlite3.connect(db_path) as connection:
+            target = connection.execute(
+                "PRAGMA foreign_key_list(product_events)"
+            ).fetchone()[2]
+        assert target == "threads"
+    finally:
+        repaired.close()
 
 
 def test_cursor_cannot_cross_thread_and_reexecution_is_not_deduplicated(

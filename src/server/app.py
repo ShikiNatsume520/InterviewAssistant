@@ -34,7 +34,7 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, AsyncIterator, Literal, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import (
     Cookie,
@@ -49,7 +49,12 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel, Field, ValidationError
@@ -65,12 +70,18 @@ from kernel.contracts import (
     PlanConfirmPayload,
     ResumeApprovePayload,
     ResumeHitlPayload,
-    ResumeSelectPayload,
     normalize_resume_value,
 )
 from kernel.logging import dlog
 from kernel.paths import PROJECT_ROOT
 from kernel.persistence import APP_DB_PATH, CHECKPOINT_DB_PATH, get_store
+from kernel.resumes import (
+    ResumeAccessDenied,
+    ResumeDocument,
+    ResumeMetadata,
+    ResumeRepository,
+    ResumeValidationError,
+)
 from kernel.runtime_model import RuntimeModelConfig, use_runtime_model
 from server.citations import extract_used_citations
 from server.events import (
@@ -97,6 +108,14 @@ from server.identity import (
 
 SESSION_COOKIE = "ia_session"
 GUEST_BACKUP_COOKIE = "ia_guest_session"
+_LAPIS_FONT_DIR = PROJECT_ROOT / "data" / "lapis-cv-vscode-v2.0.1" / "lapis-cv" / "fonts"
+_LAPIS_FONT_FILES = {
+    "SourceHanSansCN-Regular.ttf",
+    "SourceHanSansCN-Medium.ttf",
+    "SourceHanSerifCN-Bold.ttf",
+    "JetBrainsMono-Regular.ttf",
+    "iconfont.ttf",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -115,13 +134,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     events = ProductEventStore(APP_DB_PATH)
     async with AsyncSqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as saver:
         graph = build_main_graph(checkpointer=saver, store=store)
+        resumes = ResumeRepository(APP_DB_PATH)
         _state["saver"] = saver
         _state["graph"] = graph
         _state["identity"] = identity
         _state["events"] = events
+        _state["resumes"] = resumes
         try:
             yield
         finally:
+            resumes.close()
             events.close()
             identity.close()
     _state.clear()
@@ -193,6 +215,10 @@ class ChatRequest(BaseModel):
             "批准/拒绝场景传 approve / reject。"
         ),
     )
+    resume_id: str | None = Field(
+        default=None,
+        description="前端本轮指定的简历 ID；只作为 Main Agent的高优先级上下文提示",
+    )
 
 
 class CheckpointRequest(BaseModel):
@@ -220,12 +246,36 @@ class RenameThreadRequest(BaseModel):
     title: str
 
 
+class SelectThreadResumeRequest(BaseModel):
+    """持久化 Thread 的前端指定简历。"""
+
+    resume_id: str | None = None
+
+
+class UploadResumeRequest(BaseModel):
+    """浏览器读取 Markdown 后提交的文本资源。"""
+
+    original_name: str
+    content: str
+    display_name: str | None = None
+
+
+class RenameResumeRequest(BaseModel):
+    """只修改简历显示名称。"""
+
+    display_name: str
+
+
 def _identity_store() -> IdentityThreadStore:
     return cast(IdentityThreadStore, _state["identity"])
 
 
 def _event_store() -> ProductEventStore:
     return cast(ProductEventStore, _state["events"])
+
+
+def _resume_repository() -> ResumeRepository:
+    return cast(ResumeRepository, _state["resumes"])
 
 
 def _set_session_cookie(response: Response, auth: AuthSession) -> None:
@@ -271,13 +321,43 @@ def current_auth(
     return _authenticate_token(session_token)
 
 
-def _thread_json(thread: ThreadRecord) -> dict[str, str]:
+def _thread_json(thread: ThreadRecord) -> dict[str, Any]:
     return {
         "id": thread.id,
         "title": thread.title,
         "status": thread.status,
         "created_at": thread.created_at,
         "updated_at": thread.updated_at,
+        "selected_resume_id": thread.selected_resume_id,
+        "active_mode": thread.active_mode,
+        "active_agent": thread.active_agent,
+    }
+
+
+def _resume_metadata_json(resume: ResumeMetadata) -> dict[str, Any]:
+    return {
+        "id": resume.id,
+        "original_name": resume.original_name,
+        "display_name": resume.display_name,
+        "created_at": resume.created_at,
+        "updated_at": resume.updated_at,
+        "source_resume_id": resume.source_resume_id,
+    }
+
+
+def _resume_document_json(resume: ResumeDocument) -> dict[str, str]:
+    return {
+        **_resume_metadata_json(
+            ResumeMetadata(
+                id=resume.id,
+                original_name=resume.original_name,
+                display_name=resume.display_name,
+                created_at=resume.created_at,
+                updated_at=resume.updated_at,
+                source_resume_id=resume.source_resume_id,
+            )
+        ),
+        "content": resume.content,
     }
 
 
@@ -516,6 +596,141 @@ async def delete_thread(
     return response
 
 
+@app.put("/v1/threads/{thread_id}/selected-resume")
+async def select_thread_resume(
+    thread_id: str,
+    req: SelectThreadResumeRequest,
+    auth: AuthSession = Depends(current_auth),
+) -> JSONResponse:
+    """保存当前 Thread 的前端指定简历；不替 Main Agent做业务选择。"""
+    _require_thread(auth.principal, thread_id)
+    if req.resume_id is not None:
+        try:
+            _resume_repository().require(auth.principal.id, req.resume_id)
+        except ResumeAccessDenied as exc:
+            raise HTTPException(status_code=404, detail="简历不存在") from exc
+    thread = _identity_store().select_resume(
+        auth.principal, thread_id, req.resume_id
+    )
+    return _json_with_session(_thread_json(thread), auth)
+
+
+@app.post("/v1/resumes")
+async def upload_resume(
+    req: UploadResumeRequest, auth: AuthSession = Depends(current_auth)
+) -> JSONResponse:
+    """保存浏览器读取后的单个 Markdown 文本。"""
+    try:
+        resume = _resume_repository().upload(
+            auth.principal.id,
+            req.original_name,
+            req.content,
+            req.display_name,
+        )
+    except ResumeValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _json_with_session(
+        _resume_document_json(resume), auth, status.HTTP_201_CREATED
+    )
+
+
+@app.get("/v1/resumes")
+async def list_resumes(
+    auth: AuthSession = Depends(current_auth),
+) -> JSONResponse:
+    """列出当前用户的简历元数据。"""
+    items = _resume_repository().list(auth.principal.id)
+    return _json_with_session([_resume_metadata_json(item) for item in items], auth)
+
+
+@app.get("/v1/resumes/{resume_id}")
+async def read_resume(
+    resume_id: str, auth: AuthSession = Depends(current_auth)
+) -> JSONResponse:
+    """读取当前用户的一份 Markdown 简历。"""
+    try:
+        resume = _resume_repository().require(auth.principal.id, resume_id)
+    except ResumeAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="简历不存在") from exc
+    return _json_with_session(_resume_document_json(resume), auth)
+
+
+@app.patch("/v1/resumes/{resume_id}")
+async def rename_resume(
+    resume_id: str,
+    req: RenameResumeRequest,
+    auth: AuthSession = Depends(current_auth),
+) -> JSONResponse:
+    """修改显示名称，不改变内部 ID。"""
+    try:
+        resume = _resume_repository().rename(
+            auth.principal.id, resume_id, req.display_name
+        )
+    except ResumeAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="简历不存在") from exc
+    except ResumeValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _json_with_session(_resume_metadata_json(resume), auth)
+
+
+@app.delete("/v1/resumes/{resume_id}")
+async def delete_resume(
+    resume_id: str, auth: AuthSession = Depends(current_auth)
+) -> Response:
+    """永久删除简历；运行中 Thread 正在引用时拒绝。"""
+    if any(
+        thread.selected_resume_id == resume_id and thread.status == "running"
+        for thread in _identity_store().list_threads(auth.principal)
+    ):
+        raise HTTPException(status_code=409, detail="简历正在活动任务中使用")
+    try:
+        _resume_repository().delete(auth.principal.id, resume_id)
+    except ResumeAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="简历不存在") from exc
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _set_session_cookie(response, auth)
+    return response
+
+
+@app.get("/v1/resumes/{resume_id}/download")
+async def download_resume(
+    resume_id: str, auth: AuthSession = Depends(current_auth)
+) -> Response:
+    """下载当前用户已保存的 Markdown。"""
+    try:
+        resume = _resume_repository().require(auth.principal.id, resume_id)
+    except ResumeAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="简历不存在") from exc
+    filename = resume.display_name
+    if not filename.lower().endswith(".md"):
+        filename += ".md"
+    response = Response(
+        content=resume.content.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+    _set_session_cookie(response, auth)
+    return response
+
+
+@app.get("/v1/lapis-assets/{filename}")
+async def lapis_font_asset(
+    filename: str, auth: AuthSession = Depends(current_auth)
+) -> FileResponse:
+    """按白名单提供 Lapis预览字体；不暴露任意项目文件。"""
+    del auth
+    if filename not in _LAPIS_FONT_FILES:
+        raise HTTPException(status_code=404, detail="字体资源不存在")
+    path = _LAPIS_FONT_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="字体资源不存在")
+    return FileResponse(
+        path,
+        media_type="font/ttf",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 辅助
 # --------------------------------------------------------------------------- #
@@ -524,7 +739,6 @@ _PHASE_TO_SCHEMA: dict[str, type[BaseModel]] = {
     "plan_confirm": PlanConfirmPayload,
     "outline_confirm": OutlineConfirmPayload,
     "connectivity_check": ConnectivityCheckPayload,
-    "resume_select": ResumeSelectPayload,
     "resume_approve": ResumeApprovePayload,
     "resume_hitl": ResumeHitlPayload,
 }
@@ -591,7 +805,9 @@ def _normalize_and_validate(phase: str | None, value: Any) -> Any:
         return normalized
 
 
-def _interrupt_payload(intrs: Any) -> dict[str, Any]:
+def _interrupt_payload(
+    intrs: Any, workspace: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """把 interrupt 对象列表转成可序列化的 dict。
 
     若 interrupt value 是含 ``phase`` 的 dict，用 ``kernel.contracts`` 对应 schema
@@ -604,6 +820,10 @@ def _interrupt_payload(intrs: Any) -> dict[str, Any]:
             schema = _PHASE_TO_SCHEMA.get(val["phase"])
             if schema is not None:
                 val = schema.model_validate(val).model_dump()
+            if workspace is not None and str(val.get("phase", "")).startswith(
+                ("resume_", "plan_confirm")
+            ):
+                val["workspace"] = workspace
         out.append(val if isinstance(val, (str, dict, list)) else str(val))
     return {"interrupts": out}
 
@@ -713,11 +933,19 @@ async def _stream_graph(
     thread_id: str,
     task_id: str,
     initial_source: EventSource,
+    principal: Principal | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """观察图输出并生成只供前端使用的持久事件与临时 delta 帧。"""
     message_buffers: dict[str, tuple[EventSource, str]] = {}
     completed_tools: set[str] = set()
     current_source = initial_source
+    if principal is not None:
+        _identity_store().set_agent_activity(
+            principal,
+            thread_id,
+            active_mode="resume" if current_source == "resume" else "chat",
+            active_agent="resume" if current_source == "resume" else "main",
+        )
     last_message_id: str | None = None
     rag_executed = False
 
@@ -753,6 +981,13 @@ async def _stream_graph(
             if transition is not None:
                 yield _event_frame(transition)
             current_source = observed_source
+            if principal is not None:
+                _identity_store().set_agent_activity(
+                    principal,
+                    thread_id,
+                    active_mode="resume" if current_source == "resume" else "chat",
+                    active_agent="resume" if current_source == "resume" else "main",
+                )
             status_event = _append_product_event(
                 thread_id,
                 "task.status",
@@ -806,6 +1041,24 @@ async def _stream_graph(
                 )
                 if tool_event is not None:
                     yield _event_frame(tool_event)
+                try:
+                    result_payload = json.loads(_message_text(chunk.content))
+                except json.JSONDecodeError:
+                    result_payload = None
+                if (
+                    isinstance(result_payload, dict)
+                    and result_payload.get("outcome") in {"saved", "discarded"}
+                    and "source_resume_id" in result_payload
+                ):
+                    resume_result = _append_product_event(
+                        thread_id,
+                        "resume.result",
+                        "resume",
+                        result_payload,
+                        task_id=task_id,
+                    )
+                    if resume_result is not None:
+                        yield _event_frame(resume_result)
 
     state = await graph.aget_state(config)
     used_citations: list[Citation] = []
@@ -841,7 +1094,7 @@ async def _stream_graph(
             thread_id,
             "interrupt.requested",
             current_source,
-            _interrupt_payload(intrs2),
+            _interrupt_payload(intrs2, _workspace_from_state(state)),
             task_id=task_id,
         )
         if interrupt_event is not None:
@@ -878,13 +1131,13 @@ async def _run_locked_stream(
     runtime_model: RuntimeModelConfig | None,
 ) -> AsyncIterator[dict[str, str]]:
     """在 SSE 生命周期内持有单任务锁，断连或异常时标记为 interrupted。"""
-    final_status: Literal["idle", "interrupted"] = "interrupted"
+    final_status: Literal["idle", "waiting", "interrupted"] = "interrupted"
     try:
         with use_runtime_model(runtime_model):
             async for event in source:
                 yield event
         pending, _ = await _pending_interrupt(graph, config)
-        final_status = "interrupted" if pending else "idle"
+        final_status = "waiting" if pending else "idle"
     except asyncio.CancelledError:
         _append_product_event(
             thread_id,
@@ -929,6 +1182,14 @@ async def chat(
     """
     _require_thread(auth.principal, req.thread_id)
     runtime_model = _runtime_model_from_request(request, auth.principal)
+    selected_resume: ResumeDocument | None = None
+    if req.resume_id is not None:
+        try:
+            selected_resume = _resume_repository().require(
+                auth.principal.id, req.resume_id
+            )
+        except ResumeAccessDenied as exc:
+            raise HTTPException(status_code=404, detail="简历不存在") from exc
     graph = _state["graph"]
     config: dict[str, Any] = {
         "configurable": {
@@ -981,15 +1242,38 @@ async def chat(
             # 无 pending：新 HumanMessage 启动一轮（message 可为空——空时若图无
             # checkpoint 会立即 END，若有 checkpoint 则 astre 等同于续跑，但调用方
             # 续跑应走 /v1/checkpoint；这里 message 空属异常调用，仍按空 message 启动）
+            input_messages: list[Any] = []
+            if selected_resume is not None:
+                input_messages.append(
+                    SystemMessage(
+                        content=(
+                            "本轮前端指定简历："
+                            f"{selected_resume.display_name} "
+                            f"(resume_id={selected_resume.id})。"
+                            "这是用户给出的高优先级上下文提示，不是后端强制路由；"
+                            "请结合用户请求，必要时使用简历工具读取内容后决定是否以及"
+                            "对哪份简历调用 resume_agent。只能使用工具返回的真实 ID。"
+                        )
+                    )
+                )
+            input_messages.append(HumanMessage(content=req.message))
             input_data = {
-                "messages": [HumanMessage(content=req.message)],
+                "messages": input_messages,
                 "user_id": auth.principal.id,
             }
+            user_payload: dict[str, Any] = {"text": req.message}
+            if selected_resume is not None:
+                user_payload.update(
+                    {
+                        "resumeId": selected_resume.id,
+                        "resumeDisplayName": selected_resume.display_name,
+                    }
+                )
             user_event = _append_product_event(
                 req.thread_id,
                 "message.user",
                 "user",
-                {"text": req.message},
+                user_payload,
                 task_id=task_id,
             )
             if user_event is not None:
@@ -1013,6 +1297,7 @@ async def chat(
             thread_id=req.thread_id,
             task_id=task_id,
             initial_source=initial_source,
+            principal=auth.principal,
         ):
             yield ev
 
@@ -1084,7 +1369,7 @@ async def checkpoint(
                     req.thread_id,
                     "interrupt.requested",
                     initial_source,
-                    _interrupt_payload(intrs),
+                    _interrupt_payload(intrs, _workspace_from_state(state)),
                     task_id=task_id,
                 )
                 if interrupt_event is not None:
@@ -1117,6 +1402,7 @@ async def checkpoint(
             thread_id=req.thread_id,
             task_id=task_id,
             initial_source=initial_source,
+            principal=auth.principal,
         ):
             yield ev
 
@@ -1204,16 +1490,28 @@ def _extract_subgraph_state(state: Any) -> dict[str, Any] | None:
             tstate_type=type(tstate).__name__,
             vals_keys=list(vals.keys()) if isinstance(vals, dict) else None,
         )
-        if "resume_shot" in vals or "resume_file" in vals:
+        if "resume_shot" in vals or "resume_id" in vals:
             return {
-                "intent": str(vals.get("intent", "")),
+                "resume_id": str(vals.get("resume_id", "")),
+                "display_name": str(vals.get("source_display_name", "")),
                 "resume_shot": str(vals.get("resume_shot", "")),
-                "resume_file": str(vals.get("resume_file", "")),
                 "messages": _serialize_messages(list(vals.get("messages", []))),
                 "last_summary": str(vals.get("last_summary", "")),
                 "plan": list(vals.get("plan", []) or []),
             }
     return None
+
+
+def _workspace_from_state(state: Any) -> dict[str, Any] | None:
+    """提取只用于产品展示的 Resume 工作区快照。"""
+    snapshot = _extract_subgraph_state(state)
+    if snapshot is None:
+        return None
+    return {
+        "resumeId": snapshot["resume_id"],
+        "displayName": snapshot["display_name"],
+        "draft": snapshot["resume_shot"],
+    }
 
 
 @app.get("/v1/state")
@@ -1239,7 +1537,9 @@ async def get_state(
     vals = state.values or {}
 
     pending, intrs = await _pending_interrupt(graph, config)
-    interrupt_payload = _interrupt_payload(intrs) if pending else None
+    interrupt_payload = (
+        _interrupt_payload(intrs, _workspace_from_state(state)) if pending else None
+    )
     # pending_interrupt 取第一个 interrupt 的 value（已 schema 校验）
     first_interrupt: dict[str, Any] | None = None
     if interrupt_payload and isinstance(interrupt_payload.get("interrupts"), list):
@@ -1327,14 +1627,6 @@ async def index() -> HTMLResponse:
         if (_FRONTEND_DIST / "index.html").is_file()
         else _STATIC_DIR / "index.html"
     )
-    with open(index_path, encoding="utf-8") as f:
-        return HTMLResponse(f.read())
-
-
-@app.get("/resume", response_class=HTMLResponse)
-async def resume_page() -> HTMLResponse:
-    """返回 resume_agent 专用前端页面。"""
-    index_path = _STATIC_DIR / "resume.html"
     with open(index_path, encoding="utf-8") as f:
         return HTMLResponse(f.read())
 

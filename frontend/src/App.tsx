@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { KeyRound, LogOut, MessageSquarePlus, MoreHorizontal, Send, Settings2, Square, Trash2 } from "lucide-react";
+import { FileText, KeyRound, LogOut, MessageSquarePlus, MoreHorizontal, Paperclip, Send, Settings2, Square, Trash2, X } from "lucide-react";
 import {
   createGuestIdentity,
   createThread,
@@ -9,15 +9,20 @@ import {
   getCapabilities,
   getEvents,
   getIdentity,
+  listResumes,
   listThreads,
   renameThread,
   restoreGuest,
+  selectThreadResume,
   streamGraph,
 } from "./api";
 import { loadModelConfig, saveModelConfig } from "./modelConfig";
 import { ModelConfigModal } from "./ModelConfigModal";
+import { ResumePicker } from "./ResumePicker";
+import { ResumeWorkspace } from "./ResumeWorkspace";
 import { Timeline, type TransientMessage } from "./Timeline";
-import { ApiError, type Identity, type ModelConfig, type ProductEvent, type StreamFrame, type ThreadRecord } from "./types";
+import { isResumeInterrupt, latestResumeWorkspace, pendingInterrupt } from "./interrupts";
+import { ApiError, type Identity, type ModelConfig, type ProductEvent, type ResumeMetadata, type StreamFrame, type ThreadRecord } from "./types";
 
 function mergeEvents(current: ProductEvent[], incoming: ProductEvent[]): ProductEvent[] {
   const byId = new Map(current.map((event) => [event.eventId, event]));
@@ -115,7 +120,16 @@ function ChatPage(props: ChatPageProps) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [stoppedNotice, setStoppedNotice] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [selectedResume, setSelectedResume] = useState<ResumeMetadata | null>(null);
+  const [workspaceSelection, setWorkspaceSelection] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const [workspaceWidth, setWorkspaceWidth] = useState(() => {
+    const saved = Number(window.localStorage.getItem("resume-workspace-width"));
+    return Number.isFinite(saved) && saved > 0 ? saved : 620;
+  });
+  const [resizingWorkspace, setResizingWorkspace] = useState(false);
   const current = props.threads.find((thread) => thread.id === threadId);
 
   useEffect(() => {
@@ -127,6 +141,11 @@ function ChatPage(props: ChatPageProps) {
     if (!threadId) return;
     void getEvents(threadId).then((page) => { setEvents(page.events); setHasMore(page.hasMore); }).catch((reason) => setError(reason instanceof ApiError ? reason : new ApiError("时间线加载失败", "EVENTS_FAILED", 500, true)));
   }, [threadId]);
+
+  useEffect(() => {
+    if (!current?.selected_resume_id) { setSelectedResume(null); return; }
+    void listResumes().then((items) => setSelectedResume(items.find((item) => item.id === current.selected_resume_id) ?? null)).catch(() => setSelectedResume(null));
+  }, [current?.selected_resume_id]);
 
   const onFrame = useCallback((frame: StreamFrame) => {
     if (frame.kind === "event") {
@@ -144,7 +163,52 @@ function ChatPage(props: ChatPageProps) {
     });
   }, []);
 
-  const run = async (checkpoint = false) => {
+  const pending = pendingInterrupt(events);
+  const resumeActive = current?.active_mode === "resume";
+  const workspaceInterrupt = isResumeInterrupt(pending) ? pending : latestResumeWorkspace(events);
+
+  const clampWorkspaceWidth = useCallback((requested: number) => {
+    const available = (shellRef.current?.clientWidth ?? window.innerWidth) - 238 - 7;
+    return Math.max(480, Math.min(requested, available - 380, available * 0.68));
+  }, []);
+
+  useEffect(() => {
+    if (!resumeActive) return;
+    const clamp = () => setWorkspaceWidth((currentWidth) => clampWorkspaceWidth(currentWidth));
+    clamp();
+    window.addEventListener("resize", clamp);
+    return () => window.removeEventListener("resize", clamp);
+  }, [clampWorkspaceWidth, resumeActive]);
+
+  const startWorkspaceResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const handle = event.currentTarget;
+    const startX = event.clientX;
+    const startWidth = workspaceWidth;
+    handle.setPointerCapture(event.pointerId);
+    setResizingWorkspace(true);
+    const move = (moveEvent: PointerEvent) => setWorkspaceWidth(clampWorkspaceWidth(startWidth + moveEvent.clientX - startX));
+    const stop = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      setResizingWorkspace(false);
+      setWorkspaceWidth((currentWidth) => {
+        window.localStorage.setItem("resume-workspace-width", String(currentWidth));
+        return currentWidth;
+      });
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  };
+
+  const resetWorkspaceWidth = () => {
+    const width = clampWorkspaceWidth(620);
+    setWorkspaceWidth(width);
+    window.localStorage.setItem("resume-workspace-width", String(width));
+  };
+
+  const run = async (checkpoint = false, resumeValue?: Record<string, unknown>) => {
     if (!threadId || running) return;
     if (props.identity.kind === "guest" && !props.modelConfig) { props.onOpenModel(); return; }
     const controller = new AbortController();
@@ -155,7 +219,7 @@ function ChatPage(props: ChatPageProps) {
     const outgoingMessage = message;
     if (!checkpoint) setMessage("");
     try {
-      await streamGraph({ threadId, message: outgoingMessage, checkpoint, modelConfig: props.modelConfig, signal: controller.signal, onFrame });
+      await streamGraph({ threadId, message: outgoingMessage, resumeId: current?.selected_resume_id ?? null, resumeValue, checkpoint, modelConfig: props.modelConfig, signal: controller.signal, onFrame });
       await props.onThreadsChange();
     } catch (reason) {
       if ((reason as DOMException)?.name === "AbortError") {
@@ -193,25 +257,56 @@ function ChatPage(props: ChatPageProps) {
     navigate("/");
   };
 
+  const selectResume = async (resume: ResumeMetadata) => {
+    await selectThreadResume(threadId, resume.id);
+    setSelectedResume(resume);
+    setPickerOpen(false);
+    await props.onThreadsChange();
+  };
+
+  const clearResume = async () => {
+    await selectThreadResume(threadId, null);
+    setSelectedResume(null);
+    await props.onThreadsChange();
+  };
+
   if (!current) return <Navigate replace to="/" />;
-  return <div className="app-shell">
+  const submitDecision = (value: Record<string, unknown>) => void run(false, value);
+  const submitComposer = () => {
+    if (pending?.phase === "resume_hitl") {
+      void run(false, { action: "new_request", request: message.trim(), selection: workspaceSelection });
+      return;
+    }
+    void run(false);
+  };
+  const decisionLocked = pending !== null && pending.phase !== "resume_hitl";
+  const standby = pending?.phase === "resume_hitl";
+  const shellStyle = resumeActive ? { "--resume-workspace-width": `${workspaceWidth}px` } as CSSProperties : undefined;
+  return <div ref={shellRef} style={shellStyle} className={`app-shell ${resumeActive ? "with-resume-workspace" : ""}`}>
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark">IA</div><span>Interview Assistant</span></div>
       <button className="new-thread" onClick={() => void props.onCreate()}><MessageSquarePlus size={17} />新建会话</button>
       <div className="sidebar-label">最近会话</div>
-      <nav className="thread-list">{props.threads.map((thread) => <div className={`thread-item ${thread.id === threadId ? "active" : ""}`} key={thread.id}><button className="thread-link" onClick={() => navigate(`/threads/${thread.id}`)}><span>{thread.title}</span><small>{thread.status === "running" ? "执行中" : thread.status === "interrupted" ? "已中断" : "就绪"}</small></button><div className="thread-actions"><button title="重命名" onClick={() => void rename(thread)}><MoreHorizontal size={15} /></button><button title="删除" onClick={() => void remove(thread)}><Trash2 size={14} /></button></div></div>)}</nav>
+      <nav className="thread-list">{props.threads.map((thread) => <div className={`thread-item ${thread.id === threadId ? "active" : ""}`} key={thread.id}><button className="thread-link" onClick={() => navigate(`/threads/${thread.id}`)}><span>{thread.title}</span><small>{thread.status === "running" ? "执行中" : thread.status === "waiting" ? "待确认" : thread.status === "interrupted" ? "已中断" : "就绪"}</small></button><div className="thread-actions"><button title="重命名" onClick={() => void rename(thread)}><MoreHorizontal size={15} /></button><button title="删除" onClick={() => void remove(thread)}><Trash2 size={14} /></button></div></div>)}</nav>
       <div className="sidebar-footer">
         <button onClick={props.onOpenModel}><Settings2 size={16} />{props.identity.kind === "developer" ? "开发环境配置" : "模型配置"}</button>
         {props.identity.kind === "developer" ? <button onClick={() => void props.onRestoreGuest()}><LogOut size={16} />返回游客模式</button> : props.developerEnabled && <button onClick={() => void props.onDeveloperLogin()}><KeyRound size={16} />开发人员登录</button>}
       </div>
     </aside>
+    {resumeActive && <ResumeWorkspace key={workspaceInterrupt?.eventId ?? "resume-loading"} interrupt={workspaceInterrupt} onSelection={setWorkspaceSelection} />}
+    {resumeActive && <div className={`workspace-resizer ${resizingWorkspace ? "dragging" : ""}`} title="拖动调整简历工作区与聊天区宽度；双击恢复默认" onPointerDown={startWorkspaceResize} onDoubleClick={resetWorkspaceWidth} />}
     <main className="chat-panel">
       <header className="chat-header"><div><h1>{current.title}</h1><span>{props.identity.kind === "developer" ? "开发人员模式 · 使用服务端配置" : "游客模式 · 使用当前会话模型配置"}</span></div></header>
-      <Timeline events={events} transient={[...transient.values()]} hasMore={hasMore} loadingOlder={loadingOlder} onLoadOlder={() => void loadOlder()} />
+      <Timeline events={events} transient={[...transient.values()]} hasMore={hasMore} loadingOlder={loadingOlder} onLoadOlder={() => void loadOlder()} pendingInterrupt={pending} running={running} selection={workspaceSelection} onDecision={submitDecision} />
       {error && <div className="error-bar"><span>{error.message}</span>{error.retryable && <button onClick={() => void run(true)}>从检查点重试</button>}</div>}
       {stoppedNotice && <div className="resume-bar">已停止显示；后端将在当前节点结束后保存中断检查点。</div>}
       {current.status === "interrupted" && !running && <div className="resume-bar">上次执行已中断。<button onClick={() => void run(true)}>从最近检查点继续</button></div>}
-      <div className="composer"><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (message.trim()) void run(false); } }} placeholder="输入消息，Enter 发送，Shift + Enter 换行" disabled={running} /><button aria-label={running ? "停止生成" : "发送消息"} className={running ? "stop-button" : "send-button"} disabled={!running && !message.trim()} onClick={() => running ? abortRef.current?.abort() : void run(false)}>{running ? <Square size={17} fill="currentColor" /> : <Send size={18} />}</button></div>
+      <div className="composer-shell">
+        <div className="agent-recipient">发送给 {current.active_agent === "resume" ? "Resume Agent" : "Main Agent"}{standby ? " · 可继续提出修改需求" : ""}</div>
+        {pickerOpen && <ResumePicker selectedId={current.selected_resume_id} onSelect={selectResume} onClear={clearResume} onClose={() => setPickerOpen(false)} />}
+        {selectedResume && <div className="resume-chip"><FileText size={13} />{selectedResume.display_name}<button title="取消指定" onClick={() => void clearResume()}><X size={12} /></button></div>}
+        <div className="composer"><button className="attach-resume" title="指定简历" disabled={running || current.active_agent === "resume"} onClick={() => setPickerOpen((open) => !open)}><Paperclip size={17} /></button><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (message.trim() && !decisionLocked) submitComposer(); } }} placeholder={decisionLocked ? "请先完成当前审批" : standby ? "继续告诉 Resume Agent 还需要修改什么" : "输入消息，Enter 发送，Shift + Enter 换行"} disabled={running || decisionLocked} /><button aria-label={running ? "停止生成" : "发送消息"} className={running ? "stop-button" : "send-button"} disabled={!running && (!message.trim() || decisionLocked)} onClick={() => running ? abortRef.current?.abort() : submitComposer()}>{running ? <Square size={17} fill="currentColor" /> : <Send size={18} />}</button></div>
+      </div>
     </main>
   </div>;
 }
