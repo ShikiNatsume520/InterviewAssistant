@@ -25,6 +25,7 @@ async function parseError(response: Response): Promise<ApiError> {
     body.error?.code ?? "REQUEST_FAILED",
     response.status,
     body.error?.retryable ?? response.status >= 500,
+    body.error?.activeThreadId ?? null,
   );
 }
 
@@ -177,6 +178,11 @@ interface StreamOptions {
   modelConfig: ModelConfig | null;
   signal: AbortSignal;
   onFrame: (frame: StreamFrame) => void;
+  operationId: string;
+}
+
+export function cancelThreadTask(threadId: string): Promise<{ status: ThreadRecord["status"] }> {
+  return jsonRequest(`/v1/threads/${threadId}/cancel`, { method: "POST" });
 }
 
 export async function streamGraph(options: StreamOptions): Promise<void> {
@@ -193,9 +199,10 @@ export async function streamGraph(options: StreamOptions): Promise<void> {
       },
       body: JSON.stringify(
         options.checkpoint
-          ? { thread_id: options.threadId }
+          ? { thread_id: options.threadId, operation_id: options.operationId }
           : {
               thread_id: options.threadId,
+              operation_id: options.operationId,
               message: options.message ?? "",
               resume_id: options.resumeId ?? null,
               resume_value: options.resumeValue,

@@ -22,8 +22,17 @@ from server import app as server_app
 def _normalize_and_validate(phase: str, value: object) -> dict[str, Any]:
     """复刻 server ``_normalize_and_validate``：归一化 + schema 校验。"""
     normalized = normalize_resume_value(phase, value)
+    if isinstance(normalized, dict):
+        normalized = {
+            **normalized,
+            "phase": phase,
+            "interrupt_id": "interrupt-test-id",
+        }
     schema = PHASE_TO_INBOUND[phase]
-    return schema.model_validate(normalized).model_dump()
+    result = schema.model_validate(normalized).model_dump()
+    result.pop("phase")
+    result.pop("interrupt_id")
+    return result
 
 
 def test_resume_interrupt_product_payload_contains_recoverable_workspace() -> None:
@@ -32,6 +41,7 @@ def test_resume_interrupt_product_payload_contains_recoverable_workspace() -> No
             SimpleNamespace(
                 value={
                     "phase": "resume_approve",
+                    "interrupt_id": "interrupt-edit-1",
                     "edit_id": "edit-1",
                     "ordinal": 1,
                     "total": 2,
@@ -53,6 +63,7 @@ def test_resume_interrupt_product_payload_contains_recoverable_workspace() -> No
     )
     interrupt = payload["interrupts"][0]
     assert interrupt["edit_id"] == "edit-1"
+    assert interrupt["interrupt_id"] == "interrupt-edit-1"
     assert interrupt["workspace"]["resumeId"] == "resume-1"
     assert interrupt["workspace"]["draft"] == "# 项目\n旧描述"
 
@@ -155,6 +166,11 @@ def test_illegal_action_rejected() -> None:
     """非法 action 值应被 schema 拒绝。"""
     with pytest.raises(ValidationError):
         _normalize_and_validate("plan_confirm", {"action": "foobar"})
+
+
+def test_interrupt_identity_is_required() -> None:
+    with pytest.raises(ValidationError):
+        PHASE_TO_INBOUND["outline_confirm"].model_validate({"action": "approve"})
 
 
 def test_hitl_illegal_action_rejected() -> None:

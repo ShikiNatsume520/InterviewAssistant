@@ -170,14 +170,52 @@ async def test_research_graph_waits_for_knowledge_decision(monkeypatch: Any) -> 
     await graph.ainvoke({"gap_topic": "LangGraph 时间旅行"}, config)
     first = await graph.aget_state(config)
     assert first.next == ("outline_confirm",)
+    outline_payload = first.tasks[0].interrupts[0].value
 
-    await graph.ainvoke(Command(resume={"action": "approve"}), config)
+    await graph.ainvoke(
+        Command(
+            resume={
+                "action": "approve",
+                "phase": outline_payload["phase"],
+                "interrupt_id": outline_payload["interrupt_id"],
+            }
+        ),
+        config,
+    )
     waiting = await graph.aget_state(config)
     assert waiting.next == ("knowledge_confirm",)
     assert waiting.values["report_markdown"] == "# 完整研究报告"
     assert waiting.values["knowledge_decision"] == "pending"
 
-    result = await graph.ainvoke(Command(resume={"action": "reject"}), config)
+    knowledge_payload = waiting.tasks[0].interrupts[0].value
+    stale_result = await graph.ainvoke(
+        Command(
+            resume={
+                "action": "approve",
+                "phase": outline_payload["phase"],
+                "interrupt_id": outline_payload["interrupt_id"],
+            }
+        ),
+        config,
+    )
+    assert (
+        stale_result["__interrupt__"][0].value["interrupt_id"]
+        == knowledge_payload["interrupt_id"]
+    )
+    rearmed = await graph.aget_state(config)
+    assert rearmed.next == ("knowledge_confirm_rearm",)
+    assert rearmed.values["knowledge_decision"] == "pending"
+
+    result = await graph.ainvoke(
+        Command(
+            resume={
+                "action": "reject",
+                "phase": knowledge_payload["phase"],
+                "interrupt_id": knowledge_payload["interrupt_id"],
+            }
+        ),
+        config,
+    )
     assert result["knowledge_decision"] == "rejected"
     assert result["import_status"] == "not_requested"
     assert result["approval_status"] == "approved"

@@ -127,3 +127,40 @@ def test_thread_agent_activity_is_persisted(tmp_path: Path) -> None:
         assert active.active_agent == "resume"
     finally:
         store.close()
+
+
+def test_operation_ids_are_idempotent_and_principal_scoped(tmp_path: Path) -> None:
+    store = IdentityThreadStore(tmp_path / "app.sqlite")
+    try:
+        alice = store.create_guest_session().principal
+        bob = store.create_guest_session().principal
+        alice_thread = store.create_thread(alice, "Alice")
+        bob_thread = store.create_thread(bob, "Bob")
+
+        assert store.claim_operation(alice, alice_thread.id, "operation-1") == (
+            "started"
+        )
+        assert store.claim_operation(alice, alice_thread.id, "operation-1") == (
+            "running"
+        )
+        store.complete_operation(alice, "operation-1")
+        assert store.claim_operation(alice, alice_thread.id, "operation-1") == (
+            "completed"
+        )
+        assert store.claim_operation(bob, bob_thread.id, "operation-1") == "started"
+    finally:
+        store.close()
+
+
+def test_unstarted_operation_can_be_retried_after_task_conflict(
+    tmp_path: Path,
+) -> None:
+    store = IdentityThreadStore(tmp_path / "app.sqlite")
+    try:
+        principal = store.create_guest_session().principal
+        thread = store.create_thread(principal, "retry")
+        assert store.claim_operation(principal, thread.id, "operation-2") == "started"
+        store.discard_operation(principal, "operation-2")
+        assert store.claim_operation(principal, thread.id, "operation-2") == "started"
+    finally:
+        store.close()

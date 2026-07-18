@@ -48,7 +48,7 @@ from fastapi import (
     status,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import (
     AIMessageChunk,
@@ -144,6 +144,9 @@ _LAPIS_FONT_FILES = {
 _state: dict[str, Any] = {}
 """进程级单例容器：``{"saver": AsyncSqliteSaver, "graph": CompiledStateGraph}``."""
 
+_active_stream_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
+"""当前进程可取消的 SSE 执行任务；持久化层只保存任务锁和状态。"""
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -225,6 +228,7 @@ class ChatRequest(BaseModel):
     user_id: str = Field(
         default="default", description="用户标识，用于长期记忆 Store 键控"
     )
+    operation_id: str = Field(..., min_length=8, max_length=100)
     thread_id: str = Field(..., description="会话线程标识，用于 checkpoint 回放")
     message: str = Field(
         default="", description="本轮用户消息内容（恢复 interrupt / 续跑时可空）"
@@ -247,6 +251,7 @@ class CheckpointRequest(BaseModel):
     """``/v1/checkpoint`` 请求体（前端 init 末尾 POST，从最近 checkpoint 续跑）。"""
 
     thread_id: str = Field(..., description="会话线程标识")
+    operation_id: str = Field(..., min_length=8, max_length=100)
     user_id: str = Field(default="default", description="用户标识（与原会话一致）")
 
 
@@ -290,6 +295,7 @@ class RenameResumeRequest(BaseModel):
 
 class UploadKnowledgeRequest(BaseModel):
     """浏览器上传的一份 Markdown 知识。"""
+
     original_name: str = Field(min_length=1, max_length=255)
     content: str = Field(min_length=1)
     display_name: str | None = Field(default=None, max_length=200)
@@ -899,8 +905,12 @@ async def upload_knowledge_resource(
                 public_id = await import_public_markdown(
                     req.display_name or req.original_name, req.content
                 )
-                path = resolve_knowledge_scope("public").documents_dir / f"{public_id}.md"
-                resource_id = "public:" + hashlib.sha256(path.name.encode()).hexdigest()[:24]
+                path = (
+                    resolve_knowledge_scope("public").documents_dir / f"{public_id}.md"
+                )
+                resource_id = (
+                    "public:" + hashlib.sha256(path.name.encode()).hexdigest()[:24]
+                )
                 payload = next(
                     item for item in _public_knowledge() if item["id"] == resource_id
                 )
@@ -916,9 +926,7 @@ async def upload_knowledge_resource(
                 payload = _knowledge_json(resource)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _json_with_session(
-        payload, auth, status.HTTP_201_CREATED
-    )
+    return _json_with_session(payload, auth, status.HTTP_201_CREATED)
 
 
 @app.get("/v1/knowledge/resources/{resource_id}")
@@ -969,7 +977,9 @@ async def reindex_knowledge_resource(
             raise HTTPException(status_code=404, detail="知识资源不存在")
         with use_runtime_model(runtime_model):
             await reindex_public_resource(path.name)
-        payload = next(item for item in _public_knowledge() if item["id"] == resource_id)
+        payload = next(
+            item for item in _public_knowledge() if item["id"] == resource_id
+        )
         return _json_with_session({**payload, "readOnly": False}, auth)
     try:
         with use_runtime_model(runtime_model):
@@ -1063,6 +1073,15 @@ def _pending_phase(intrs: Any) -> str | None:
     return None
 
 
+def _pending_interrupt_id(intrs: Any) -> str | None:
+    """从 pending interrupt 列表提取稳定业务 ID。"""
+    for item in intrs or []:
+        value = getattr(item, "value", item)
+        if isinstance(value, dict) and "interrupt_id" in value:
+            return str(value["interrupt_id"])
+    return None
+
+
 async def _active_agent_source(graph: Any, config: dict[str, Any]) -> EventSource:
     """仅从 checkpoint 执行状态推断展示头像，不读取产品事件。"""
     state = await graph.aget_state(config)
@@ -1080,9 +1099,8 @@ async def _active_agent_source(graph: Any, config: dict[str, Any]) -> EventSourc
 def _normalize_and_validate(phase: str | None, value: Any) -> Any:
     """归一化 resume 值并校验，返回规范 dict（传给 ``Command(resume=...)``）。
 
-    旧前端裸串 / 旧 dict 经 ``normalize_resume_value`` 转成规范 dict，再用
-    ``PHASE_TO_INBOUND[phase]`` schema 校验。校验失败或无 phase 时不阻断——
-    记日志并透传归一化结果（保证旧前端兼容，不因新校验而崩）。
+    前端值经 ``normalize_resume_value`` 转成规范 dict，再用
+    ``PHASE_TO_INBOUND[phase]`` schema 严格校验。身份字段缺失或格式错误时拒绝恢复。
     """
     if phase is None:
         return value
@@ -1090,17 +1108,7 @@ def _normalize_and_validate(phase: str | None, value: Any) -> Any:
     schema = PHASE_TO_INBOUND.get(phase)
     if schema is None:
         return normalized
-    try:
-        return schema.model_validate(normalized).model_dump()
-    except ValidationError as e:
-        dlog(
-            "server",
-            "_normalize_and_validate",
-            "校验失败，透传归一化结果",
-            phase=phase,
-            err=str(e).splitlines()[0],
-        )
-        return normalized
+    return schema.model_validate(normalized).model_dump()
 
 
 def _interrupt_payload(
@@ -1629,9 +1637,14 @@ async def _run_locked_stream(
     thread_id: str,
     source_agent: EventSource,
     runtime_model: RuntimeModelConfig | None,
+    operation_id: str,
 ) -> AsyncIterator[dict[str, str]]:
     """在 SSE 生命周期内持有单任务锁，断连或异常时标记为 interrupted。"""
     final_status: Literal["idle", "waiting", "interrupted"] = "interrupted"
+    current_task = asyncio.current_task()
+    registry_key = (principal.id, thread_id)
+    if current_task is not None:
+        _active_stream_tasks[registry_key] = current_task
     try:
         with use_runtime_model(runtime_model):
             async for event in source:
@@ -1662,11 +1675,93 @@ async def _run_locked_stream(
         if failed is not None:
             yield _event_frame(failed)
     finally:
+        if (
+            current_task is not None
+            and _active_stream_tasks.get(registry_key) is current_task
+        ):
+            _active_stream_tasks.pop(registry_key, None)
         _identity_store().release_task(
             principal,
             task_id,
             status=final_status,
         )
+        _identity_store().complete_operation(principal, operation_id)
+
+
+def _claim_operation_or_raise(
+    principal: Principal, thread_id: str, operation_id: str
+) -> None:
+    """声明幂等操作；重复请求不再次进入 LangGraph。"""
+    try:
+        outcome = _identity_store().claim_operation(principal, thread_id, operation_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "OPERATION_ID_CONFLICT",
+                "message": "该操作标识已用于其他会话",
+                "retryable": False,
+            },
+        ) from exc
+    if outcome == "running":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "OPERATION_IN_PROGRESS",
+                "message": "该操作正在执行，请刷新时间线查看进度",
+                "retryable": True,
+            },
+        )
+    if outcome == "completed":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "OPERATION_COMPLETED",
+                "message": "该操作已经完成，请刷新时间线查看结果",
+                "retryable": False,
+            },
+        )
+
+
+def _task_conflict(exc: ActiveTaskConflict) -> HTTPException:
+    """把 principal 级锁冲突转换为包含活动 Thread 的稳定错误。"""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "TASK_CONFLICT",
+            "message": "当前身份已有任务正在执行",
+            "retryable": True,
+            "activeThreadId": exc.thread_id,
+        },
+    )
+
+
+@app.post("/v1/threads/{thread_id}/cancel")
+async def cancel_thread_task(
+    thread_id: str, auth: AuthSession = Depends(current_auth)
+) -> JSONResponse:
+    """幂等取消当前进程中的 Thread 执行，并等待任务锁完成释放。"""
+    thread = _require_thread(auth.principal, thread_id)
+    task = _active_stream_tasks.get((auth.principal.id, thread_id))
+    if task is not None and not task.done():
+        task.cancel()
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            thread = _require_thread(auth.principal, thread_id)
+            if thread.status != "running":
+                break
+    thread = _require_thread(auth.principal, thread_id)
+    if thread.status == "running":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CANCEL_PENDING",
+                "message": "任务仍在结束当前节点，请稍后重试",
+                "retryable": True,
+                "activeThreadId": thread_id,
+            },
+        )
+    return _json_with_session({"status": thread.status}, auth)
 
 
 @app.post("/v1/chat")
@@ -1706,26 +1801,57 @@ async def chat(
         message_len=len(req.message),
         has_resume_value=req.resume_value is not None,
     )
+    pending_at_start, intrs_at_start = await _pending_interrupt(graph, config)
+    resume_value: Any = None
+    if pending_at_start:
+        phase_at_start = _pending_phase(intrs_at_start)
+        try:
+            resume_value = _normalize_and_validate(
+                phase_at_start,
+                req.resume_value if req.resume_value is not None else req.message,
+            )
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INTERRUPT_RESPONSE_INVALID",
+                    "message": "审批响应缺少当前 Interrupt 的身份信息",
+                    "retryable": False,
+                },
+            ) from exc
+        expected_interrupt_id = _pending_interrupt_id(intrs_at_start)
+        actual_interrupt_id = (
+            str(resume_value.get("interrupt_id", ""))
+            if isinstance(resume_value, dict)
+            else ""
+        )
+        if not expected_interrupt_id or actual_interrupt_id != expected_interrupt_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "INTERRUPT_ID_MISMATCH",
+                    "message": "该决定不属于当前等待中的审批，请刷新时间线后重试",
+                    "retryable": True,
+                },
+            )
 
     async def event_gen() -> AsyncIterator[dict[str, str]]:
-        pending, intrs = await _pending_interrupt(graph, config)
-        dlog("server", "/v1/chat", f"pending_interrupt={pending}")
-        if pending:
+        dlog("server", "/v1/chat", f"pending_interrupt={pending_at_start}")
+        if pending_at_start:
             # 有 pending interrupt：用 resume_value（或 message）恢复。
             # 不在开头推 interrupt——前端在上一轮流末已收到并渲染了该 interrupt，
             # 这里再推会重复弹框。图恢复后跑到下个挂起点由 _stream_graph 流末推。
-            raw_value: Any = (
-                req.resume_value if req.resume_value is not None else req.message
-            )
-            # 归一化：旧前端裸串/旧 dict → 规范 dict {action, ...}，再 schema 校验。
-            # 旧 static/ 前端与新 React 前端在此对齐，子图节点只读规范字段。
-            phase = _pending_phase(intrs)
-            value: Any = _normalize_and_validate(phase, raw_value)
+            phase = _pending_phase(intrs_at_start)
+            value = resume_value
             resolved = _append_product_event(
                 req.thread_id,
                 "interrupt.resolved",
                 "user",
-                {"phase": phase, "decision": value},
+                {
+                    "phase": phase,
+                    "interruptId": _pending_interrupt_id(intrs_at_start),
+                    "decision": value,
+                },
                 task_id=task_id,
             )
             if resolved is not None:
@@ -1805,10 +1931,12 @@ async def chat(
 
     initial_source = await _active_agent_source(graph, config)
     task_id = secrets.token_urlsafe(18)
+    _claim_operation_or_raise(auth.principal, req.thread_id, req.operation_id)
     try:
         _identity_store().acquire_task(auth.principal, req.thread_id, task_id)
     except ActiveTaskConflict as exc:
-        raise HTTPException(status_code=409, detail="已有任务正在执行") from exc
+        _identity_store().discard_operation(auth.principal, req.operation_id)
+        raise _task_conflict(exc) from exc
     response = EventSourceResponse(
         _run_locked_stream(
             event_gen(),
@@ -1819,6 +1947,7 @@ async def chat(
             req.thread_id,
             initial_source,
             runtime_model,
+            req.operation_id,
         )
     )
     _set_session_cookie(response, auth)
@@ -1910,10 +2039,12 @@ async def checkpoint(
 
     initial_source = await _active_agent_source(graph, config)
     task_id = secrets.token_urlsafe(18)
+    _claim_operation_or_raise(auth.principal, req.thread_id, req.operation_id)
     try:
         _identity_store().acquire_task(auth.principal, req.thread_id, task_id)
     except ActiveTaskConflict as exc:
-        raise HTTPException(status_code=409, detail="已有任务正在执行") from exc
+        _identity_store().discard_operation(auth.principal, req.operation_id)
+        raise _task_conflict(exc) from exc
     response = EventSourceResponse(
         _run_locked_stream(
             event_gen(),
@@ -1924,6 +2055,7 @@ async def checkpoint(
             req.thread_id,
             initial_source,
             runtime_model,
+            req.operation_id,
         )
     )
     _set_session_cookie(response, auth)
@@ -2109,10 +2241,8 @@ async def health() -> dict[str, str]:
     return {"status": "ok" if "graph" in _state else "warming"}
 
 
-# 静态前端：挂载 static/ 目录，``GET /`` 返回 index.html。
-_STATIC_DIR = PROJECT_ROOT / "static"
+# React 构建产物由 FastAPI 同源托管。
 _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 if (_FRONTEND_DIST / "assets").is_dir():
     app.mount(
         "/assets",
@@ -2121,16 +2251,20 @@ if (_FRONTEND_DIST / "assets").is_dir():
     )
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
-    """优先返回 React 构建产物；未构建时保留旧测试页便于过渡。"""
-    index_path = (
-        _FRONTEND_DIST / "index.html"
-        if (_FRONTEND_DIST / "index.html").is_file()
-        else _STATIC_DIR / "index.html"
-    )
-    with open(index_path, encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+@app.get("/", response_class=FileResponse)
+async def index() -> FileResponse:
+    """返回 React 构建产物；缺失时明确要求先完成前端构建。"""
+    index_path = _FRONTEND_DIST / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "FRONTEND_NOT_BUILT",
+                "message": "前端尚未构建，请先在 frontend 目录运行 npm run build",
+                "retryable": False,
+            },
+        )
+    return FileResponse(index_path)
 
 
 @app.get("/{frontend_path:path}", response_class=FileResponse)

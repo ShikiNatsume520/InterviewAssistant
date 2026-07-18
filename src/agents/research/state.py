@@ -60,6 +60,7 @@ class ResearchState(TypedDict, total=False):
     report_summary: str
     proposed_file_name: str
     knowledge_decision: Literal["pending", "approved", "rejected", "not_asked"]
+    knowledge_interrupt_rearm: bool
     import_status: Literal["pending", "completed", "failed", "not_requested"]
     knowledge_resource_id: str
     approval_status: Literal["approved", "rejected", "aborted"]
