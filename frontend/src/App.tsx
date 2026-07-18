@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { FileText, KeyRound, LogOut, MessageSquarePlus, MoreHorizontal, Paperclip, Send, Settings2, Square, Trash2, X } from "lucide-react";
+import { BookOpen, FileText, KeyRound, LogOut, MessageSquarePlus, MoreHorizontal, Paperclip, Send, Settings2, Square, Trash2, X } from "lucide-react";
 import {
   createGuestIdentity,
   createThread,
@@ -18,6 +18,7 @@ import {
 } from "./api";
 import { loadModelConfig, saveModelConfig } from "./modelConfig";
 import { ModelConfigModal } from "./ModelConfigModal";
+import { KnowledgePage } from "./KnowledgePage";
 import { ResumePicker } from "./ResumePicker";
 import { ResumeWorkspace } from "./ResumeWorkspace";
 import { Timeline, type TransientMessage } from "./Timeline";
@@ -87,10 +88,16 @@ export function App() {
     <Routes>
       <Route path="/" element={threads[0] ? <Navigate replace to={`/threads/${threads[0].id}`} /> : <Welcome onCreate={handleCreate} />} />
       <Route path="/threads/:threadId" element={<ChatPage identity={identity} threads={threads} modelConfig={modelConfig} onThreadsChange={refreshThreads} onCreate={handleCreate} onOpenModel={() => { if (identity.kind === "guest") setShowModelConfig(true); }} developerEnabled={developerEnabled} onDeveloperLogin={handleDeveloperLogin} onRestoreGuest={handleRestoreGuest} />} />
+      <Route path="/knowledge" element={<KnowledgeShell identity={identity} threads={threads} modelConfig={modelConfig} onCreate={handleCreate} onOpenModel={() => { if (identity.kind === "guest") setShowModelConfig(true); }} developerEnabled={developerEnabled} onDeveloperLogin={handleDeveloperLogin} onRestoreGuest={handleRestoreGuest} />} />
       <Route path="*" element={<Navigate replace to="/" />} />
     </Routes>
     {showModelConfig && <ModelConfigModal initial={modelConfig} onClose={() => setShowModelConfig(false)} onSave={(config) => { saveModelConfig(config); setModelConfig(config); setShowModelConfig(false); }} />}
   </>;
+}
+
+function KnowledgeShell({ identity, threads, modelConfig, onCreate, onOpenModel, developerEnabled, onDeveloperLogin, onRestoreGuest }: { identity: Identity; threads: ThreadRecord[]; modelConfig: ModelConfig | null; onCreate: () => Promise<void>; onOpenModel: () => void; developerEnabled: boolean; onDeveloperLogin: () => Promise<void>; onRestoreGuest: () => Promise<void> }) {
+  const navigate = useNavigate();
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">IA</div><span>Interview Assistant</span></div><button className="new-thread" onClick={() => void onCreate()}><MessageSquarePlus size={17} />新建会话</button><button className="knowledge-nav active"><BookOpen size={16} />知识库</button><div className="sidebar-label">最近会话</div><nav className="thread-list">{threads.map((thread) => <button className="thread-link knowledge-thread" key={thread.id} onClick={() => navigate(`/threads/${thread.id}`)}><span>{thread.title}</span><small>{thread.status === "waiting" ? "待确认" : "就绪"}</small></button>)}</nav><div className="sidebar-footer"><button onClick={onOpenModel}><Settings2 size={16} />{identity.kind === "developer" ? "开发环境配置" : "模型配置"}</button>{identity.kind === "developer" ? <button onClick={() => void onRestoreGuest()}><LogOut size={16} />返回游客模式</button> : developerEnabled && <button onClick={() => void onDeveloperLogin()}><KeyRound size={16} />开发人员登录</button>}</div></aside><KnowledgePage identityKind={identity.kind} modelConfig={modelConfig} requireModelConfig={() => { if (identity.kind === "developer" || modelConfig) return true; onOpenModel(); return false; }} /></div>;
 }
 
 function Welcome({ onCreate }: { onCreate: () => void }) {
@@ -298,6 +305,7 @@ function ChatPage(props: ChatPageProps) {
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark">IA</div><span>Interview Assistant</span></div>
       <button className="new-thread" onClick={() => void props.onCreate()}><MessageSquarePlus size={17} />新建会话</button>
+      <button className="knowledge-nav" onClick={() => navigate("/knowledge")}><BookOpen size={16} />知识库</button>
       <div className="sidebar-label">最近会话</div>
       <nav className="thread-list">{props.threads.map((thread) => <div className={`thread-item ${thread.id === threadId ? "active" : ""}`} key={thread.id}><button className="thread-link" onClick={() => navigate(`/threads/${thread.id}`)}><span>{thread.title}</span><small>{thread.status === "running" ? "执行中" : thread.status === "waiting" ? "待确认" : thread.status === "interrupted" ? "已中断" : "就绪"}</small></button><div className="thread-actions"><button title="重命名" onClick={() => void rename(thread)}><MoreHorizontal size={15} /></button><button title="删除" onClick={() => void remove(thread)}><Trash2 size={14} /></button></div></div>)}</nav>
       <div className="sidebar-footer">

@@ -153,10 +153,13 @@ async def rag_agent_node(
     # 异步调用子图（模块级实例，继承父图 checkpointer）
     # 当前 RAG 子图无 interrupt，try/except 透传 GraphInterrupt 为预留
     try:
+        configurable = config.get("configurable", {})
+        principal_id = str(configurable.get("user_id", ""))
         result = await rag_graph.ainvoke(
             {
                 "search_query": query,
                 "search_type": stype,
+                "principal_id": principal_id,
             },
             config,
         )

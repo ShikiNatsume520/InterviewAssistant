@@ -30,6 +30,22 @@ export interface ResumeDocument extends ResumeMetadata {
   content: string;
 }
 
+export interface KnowledgeResource {
+  id: string;
+  scope: "public" | "personal";
+  sourceType: "builtin" | "upload" | "research";
+  displayName: string;
+  status: "pending" | "indexing" | "ready" | "failed" | "deleting" | "delete_failed";
+  failureReason: string;
+  createdAt: string;
+  updatedAt: string;
+  readOnly: boolean;
+}
+
+export interface KnowledgeDocument extends KnowledgeResource {
+  content: string;
+}
+
 export interface ProductEvent {
   eventId: string;
   threadId: string;

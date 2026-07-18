@@ -23,7 +23,7 @@ def retrieve_node(state: RAGState) -> dict[str, Any]:
     query = state.get("search_query", "")
     stype = state.get("search_type", "semantic")
     dlog("rag", "retrieve", "检索开始", query=query, search_type=stype)
-    results = retrieve_pipeline(query, stype)
+    results = retrieve_pipeline(query, stype, state.get("principal_id", ""))
     dlog("rag", "retrieve", "检索完成", results_n=len(results))
     return {"raw_results": results}
 

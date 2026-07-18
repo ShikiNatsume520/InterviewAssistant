@@ -29,6 +29,9 @@ class RawResult(TypedDict):
     content: str
     score: float
     source: str
+    resource_id: str
+    scope: str
+    display_name: str
 
 
 class Citation(TypedDict):
@@ -48,6 +51,9 @@ class Citation(TypedDict):
     end_line: int
     content: str
     score: float
+    resource_id: str
+    scope: str
+    display_name: str
 
 
 class RAGState(TypedDict, total=False):
@@ -67,6 +73,7 @@ class RAGState(TypedDict, total=False):
 
     search_query: str
     search_type: Literal["semantic", "keyword"]
+    principal_id: str
     raw_results: list[RawResult]
     citations_output: list[Citation]
     gap_topic: str | None

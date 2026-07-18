@@ -4,6 +4,8 @@ import {
   type ApiErrorBody,
   type EventPage,
   type Identity,
+  type KnowledgeDocument,
+  type KnowledgeResource,
   type ModelConfig,
   type ResumeDocument,
   type ResumeMetadata,
@@ -91,6 +93,33 @@ export function selectThreadResume(threadId: string, resumeId: string | null): P
 
 export function listResumes(): Promise<ResumeMetadata[]> {
   return jsonRequest("/v1/resumes");
+}
+
+export function listKnowledgeResources(): Promise<KnowledgeResource[]> {
+  return jsonRequest("/v1/knowledge/resources");
+}
+
+export function readKnowledgeResource(id: string): Promise<KnowledgeDocument> {
+  return jsonRequest(`/v1/knowledge/resources/${encodeURIComponent(id)}`);
+}
+
+export function uploadKnowledge(file: File, modelConfig: ModelConfig | null, scope: "personal" | "public" = "personal"): Promise<KnowledgeResource> {
+  return file.text().then((content) => jsonRequest("/v1/knowledge/resources", {
+    method: "POST",
+    headers: modelHeaders(modelConfig),
+    body: JSON.stringify({ original_name: file.name, content, scope }),
+  }));
+}
+
+export function reindexKnowledge(id: string, modelConfig: ModelConfig | null): Promise<KnowledgeResource> {
+  return jsonRequest(`/v1/knowledge/resources/${encodeURIComponent(id)}/reindex`, {
+    method: "POST",
+    headers: modelHeaders(modelConfig),
+  });
+}
+
+export function deleteKnowledge(id: string): Promise<void> {
+  return jsonRequest(`/v1/knowledge/resources/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export function uploadResume(file: File): Promise<ResumeDocument> {
