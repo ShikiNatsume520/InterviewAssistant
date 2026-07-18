@@ -51,6 +51,13 @@ export function getCapabilities(): Promise<{ developerLogin: boolean }> {
   return jsonRequest("/v1/capabilities");
 }
 
+export function testModelConfig(config: ModelConfig | null): Promise<{ ok: boolean; model: string }> {
+  return jsonRequest("/v1/model-config/test", {
+    method: "POST",
+    headers: modelHeaders(config),
+  });
+}
+
 export function developerLogin(accessToken: string): Promise<Identity> {
   return jsonRequest("/v1/identity/developer", {
     method: "POST",

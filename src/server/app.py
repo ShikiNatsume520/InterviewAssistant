@@ -88,6 +88,7 @@ from kernel.knowledge import (
     KnowledgeRepository,
     KnowledgeResource,
 )
+from kernel.llm import get_chat_model
 from kernel.logging import dlog
 from kernel.paths import PROJECT_ROOT
 from kernel.persistence import APP_DB_PATH, CHECKPOINT_DB_PATH, get_store
@@ -421,6 +422,9 @@ def _runtime_model_from_request(
     api_key = request.headers.get("X-IA-API-Key", "").strip()
     base_url = request.headers.get("X-IA-Base-URL", "").strip().rstrip("/")
     model = request.headers.get("X-IA-Model", "").strip()
+    api_format = request.headers.get(
+        "X-IA-API-Format", "openai-chat-completions"
+    ).strip()
     if not api_key or not base_url or not model:
         raise HTTPException(
             status_code=400,
@@ -440,6 +444,29 @@ def _runtime_model_from_request(
                 "retryable": False,
             },
         )
+    if api_format != "openai-chat-completions":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "API_FORMAT_UNSUPPORTED",
+                "message": "当前版本只支持 OpenAI Chat Completions 格式",
+                "retryable": False,
+            },
+        )
+    provider_host = parsed.hostname or ""
+    if parsed.scheme != "https" and provider_host not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROVIDER_HTTPS_REQUIRED",
+                "message": "模型服务地址必须使用 HTTPS；仅本机调试允许 HTTP",
+                "retryable": False,
+            },
+        )
     host = request.url.hostname or ""
     if request.url.scheme != "https" and host not in {"localhost", "127.0.0.1", "::1"}:
         raise HTTPException(
@@ -450,7 +477,43 @@ def _runtime_model_from_request(
                 "retryable": False,
             },
         )
-    return RuntimeModelConfig(api_key=api_key, base_url=base_url, model=model)
+    return RuntimeModelConfig(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        api_format="openai-chat-completions",
+    )
+
+
+@app.post("/v1/model-config/test")
+async def test_model_config(
+    request: Request, auth: AuthSession = Depends(current_auth)
+) -> JSONResponse:
+    """使用请求级或开发环境配置执行一次最小模型调用，不持久化凭据。"""
+    runtime_model = _runtime_model_from_request(request, auth.principal)
+    try:
+        with use_runtime_model(runtime_model):
+            response = await get_chat_model().ainvoke(
+                "Reply with exactly OK. Do not add any other text."
+            )
+        del response
+    except Exception as exc:
+        dlog(
+            "server",
+            "test_model_config",
+            "模型连接测试失败",
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "MODEL_CONNECTION_FAILED",
+                "message": "无法连接模型服务，请检查地址、模型名和 API Key",
+                "retryable": True,
+            },
+        ) from exc
+    model_name = runtime_model.model if runtime_model is not None else "environment"
+    return _json_with_session({"ok": True, "model": model_name}, auth)
 
 
 @app.post("/v1/identity/guest")

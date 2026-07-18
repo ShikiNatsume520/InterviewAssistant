@@ -16,7 +16,7 @@ import {
   selectThreadResume,
   streamGraph,
 } from "./api";
-import { loadModelConfig, saveModelConfig } from "./modelConfig";
+import { clearModelConfig, loadModelConfig, saveModelConfig } from "./modelConfig";
 import { ModelConfigModal } from "./ModelConfigModal";
 import { KnowledgePage } from "./KnowledgePage";
 import { ResumePicker } from "./ResumePicker";
@@ -87,11 +87,11 @@ export function App() {
   return <>
     <Routes>
       <Route path="/" element={threads[0] ? <Navigate replace to={`/threads/${threads[0].id}`} /> : <Welcome onCreate={handleCreate} />} />
-      <Route path="/threads/:threadId" element={<ChatPage identity={identity} threads={threads} modelConfig={modelConfig} onThreadsChange={refreshThreads} onCreate={handleCreate} onOpenModel={() => { if (identity.kind === "guest") setShowModelConfig(true); }} developerEnabled={developerEnabled} onDeveloperLogin={handleDeveloperLogin} onRestoreGuest={handleRestoreGuest} />} />
-      <Route path="/knowledge" element={<KnowledgeShell identity={identity} threads={threads} modelConfig={modelConfig} onCreate={handleCreate} onOpenModel={() => { if (identity.kind === "guest") setShowModelConfig(true); }} developerEnabled={developerEnabled} onDeveloperLogin={handleDeveloperLogin} onRestoreGuest={handleRestoreGuest} />} />
+      <Route path="/threads/:threadId" element={<ChatPage identity={identity} threads={threads} modelConfig={modelConfig} onThreadsChange={refreshThreads} onCreate={handleCreate} onOpenModel={() => setShowModelConfig(true)} developerEnabled={developerEnabled} onDeveloperLogin={handleDeveloperLogin} onRestoreGuest={handleRestoreGuest} />} />
+      <Route path="/knowledge" element={<KnowledgeShell identity={identity} threads={threads} modelConfig={modelConfig} onCreate={handleCreate} onOpenModel={() => setShowModelConfig(true)} developerEnabled={developerEnabled} onDeveloperLogin={handleDeveloperLogin} onRestoreGuest={handleRestoreGuest} />} />
       <Route path="*" element={<Navigate replace to="/" />} />
     </Routes>
-    {showModelConfig && <ModelConfigModal initial={modelConfig} onClose={() => setShowModelConfig(false)} onSave={(config) => { saveModelConfig(config); setModelConfig(config); setShowModelConfig(false); }} />}
+    {showModelConfig && <ModelConfigModal identityKind={identity.kind} initial={modelConfig} onClose={() => setShowModelConfig(false)} onClear={() => { clearModelConfig(); setModelConfig(null); setShowModelConfig(false); }} onSave={(config) => { saveModelConfig(config); setModelConfig(config); setShowModelConfig(false); }} />}
   </>;
 }
 

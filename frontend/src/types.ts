@@ -63,6 +63,8 @@ export interface EventPage {
 }
 
 export interface ModelConfig {
+  providerId: "deepseek" | "openai" | "custom";
+  apiFormat: "openai-chat-completions";
   baseUrl: string;
   model: string;
   apiKey: string;
