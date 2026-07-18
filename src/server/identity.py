@@ -33,6 +33,11 @@ class AccessDenied(Exception):
 class ActiveTaskConflict(Exception):
     """当前身份已有活动任务，或目标 Thread 正在执行。"""
 
+    def __init__(self, message: str, *, thread_id: str | None = None) -> None:
+        """记录占用锁的 Thread，供客户端给出可操作冲突提示。"""
+        super().__init__(message)
+        self.thread_id = thread_id
+
 
 @dataclass(frozen=True)
 class Principal:
@@ -150,6 +155,7 @@ class IdentityThreadStore:
                     task_id TEXT NOT NULL,
                     started_at TEXT NOT NULL
                 );
+
                 """
             )
             columns = {
@@ -175,6 +181,22 @@ class IdentityThreadStore:
             ).fetchone()
             if schema_row is not None and "'waiting'" not in str(schema_row["sql"]):
                 self._migrate_threads_for_waiting_status()
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operations (
+                    principal_id TEXT NOT NULL
+                        REFERENCES principals(id) ON DELETE CASCADE,
+                    operation_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL
+                        REFERENCES threads(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('running', 'completed')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (principal_id, operation_id)
+                )
+                """
+            )
 
     def _migrate_threads_for_waiting_status(self) -> None:
         """扩展旧数据库的 Thread 状态约束，同时保留活动任务。"""
@@ -507,7 +529,73 @@ class IdentityThreadStore:
                     (_iso(_now()), thread_id),
                 )
         except sqlite3.IntegrityError as exc:
-            raise ActiveTaskConflict("principal already has an active task") from exc
+            raise ActiveTaskConflict(
+                "principal already has an active task",
+                thread_id=self.active_thread_id(principal),
+            ) from exc
+
+    def active_thread_id(self, principal: Principal) -> str | None:
+        """返回当前身份正在执行的 Thread，供冲突提示和显式取消使用。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT thread_id FROM active_tasks WHERE principal_id = ?",
+                (principal.id,),
+            ).fetchone()
+        return str(row["thread_id"]) if row is not None else None
+
+    def claim_operation(
+        self, principal: Principal, thread_id: str, operation_id: str
+    ) -> Literal["started", "running", "completed"]:
+        """声明一个用户操作；重复 ID 返回既有状态而不再次执行。"""
+        self.require_thread(principal, thread_id)
+        now = _iso(_now())
+        try:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO operations(
+                        principal_id, operation_id, thread_id, status,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, 'running', ?, ?)
+                    """,
+                    (principal.id, operation_id, thread_id, now, now),
+                )
+            return "started"
+        except sqlite3.IntegrityError:
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT thread_id, status FROM operations
+                    WHERE principal_id = ? AND operation_id = ?
+                    """,
+                    (principal.id, operation_id),
+                ).fetchone()
+            if row is None or str(row["thread_id"]) != thread_id:
+                raise ValueError("operation_id already belongs to another thread")
+            status: Literal["running", "completed"] = row["status"]
+            return status
+
+    def complete_operation(self, principal: Principal, operation_id: str) -> None:
+        """把已被服务端接受的操作标为完成；正文和凭据从不进入账本。"""
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE operations SET status = 'completed', updated_at = ?
+                WHERE principal_id = ? AND operation_id = ?
+                """,
+                (_iso(_now()), principal.id, operation_id),
+            )
+
+    def discard_operation(self, principal: Principal, operation_id: str) -> None:
+        """请求尚未获得执行锁时撤销声明，使同一操作 ID 可以安全重试。"""
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                DELETE FROM operations
+                WHERE principal_id = ? AND operation_id = ? AND status = 'running'
+                """,
+                (principal.id, operation_id),
+            )
 
     def release_task(
         self,

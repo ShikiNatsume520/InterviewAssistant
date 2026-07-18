@@ -4,6 +4,7 @@ import { BookOpen, FileText, KeyRound, LogOut, MessageSquarePlus, MoreHorizontal
 import {
   createGuestIdentity,
   createThread,
+  cancelThreadTask,
   deleteThread,
   developerLogin,
   getCapabilities,
@@ -31,6 +32,13 @@ function mergeEvents(current: ProductEvent[], incoming: ProductEvent[]): Product
   return [...byId.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
+function threadStatusLabel(status: ThreadRecord["status"]): string {
+  if (status === "running") return "执行中";
+  if (status === "waiting") return "待确认";
+  if (status === "interrupted") return "待恢复";
+  return "就绪";
+}
+
 export function App() {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [threads, setThreads] = useState<ThreadRecord[]>([]);
@@ -56,6 +64,12 @@ export function App() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!threads.some((thread) => thread.status === "running")) return;
+    const timer = window.setTimeout(() => { void refreshThreads(); }, 750);
+    return () => window.clearTimeout(timer);
+  }, [refreshThreads, threads]);
 
   const handleCreate = async () => {
     const created = await createThread();
@@ -97,7 +111,7 @@ export function App() {
 
 function KnowledgeShell({ identity, threads, modelConfig, onCreate, onOpenModel, developerEnabled, onDeveloperLogin, onRestoreGuest }: { identity: Identity; threads: ThreadRecord[]; modelConfig: ModelConfig | null; onCreate: () => Promise<void>; onOpenModel: () => void; developerEnabled: boolean; onDeveloperLogin: () => Promise<void>; onRestoreGuest: () => Promise<void> }) {
   const navigate = useNavigate();
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">IA</div><span>Interview Assistant</span></div><button className="new-thread" onClick={() => void onCreate()}><MessageSquarePlus size={17} />新建会话</button><button className="knowledge-nav active"><BookOpen size={16} />知识库</button><div className="sidebar-label">最近会话</div><nav className="thread-list">{threads.map((thread) => <button className="thread-link knowledge-thread" key={thread.id} onClick={() => navigate(`/threads/${thread.id}`)}><span>{thread.title}</span><small>{thread.status === "waiting" ? "待确认" : "就绪"}</small></button>)}</nav><div className="sidebar-footer"><button onClick={onOpenModel}><Settings2 size={16} />{identity.kind === "developer" ? "开发环境配置" : "模型配置"}</button>{identity.kind === "developer" ? <button onClick={() => void onRestoreGuest()}><LogOut size={16} />返回游客模式</button> : developerEnabled && <button onClick={() => void onDeveloperLogin()}><KeyRound size={16} />开发人员登录</button>}</div></aside><KnowledgePage identityKind={identity.kind} modelConfig={modelConfig} requireModelConfig={() => { if (identity.kind === "developer" || modelConfig) return true; onOpenModel(); return false; }} /></div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">IA</div><span>Interview Assistant</span></div><button className="new-thread" onClick={() => void onCreate()}><MessageSquarePlus size={17} />新建会话</button><button className="knowledge-nav active"><BookOpen size={16} />知识库</button><div className="sidebar-label">最近会话</div><nav className="thread-list">{threads.map((thread) => <button className="thread-link knowledge-thread" key={thread.id} onClick={() => navigate(`/threads/${thread.id}`)}><span>{thread.title}</span><small>{threadStatusLabel(thread.status)}</small></button>)}</nav><div className="sidebar-footer"><button onClick={onOpenModel}><Settings2 size={16} />{identity.kind === "developer" ? "开发环境配置" : "模型配置"}</button>{identity.kind === "developer" ? <button onClick={() => void onRestoreGuest()}><LogOut size={16} />返回游客模式</button> : developerEnabled && <button onClick={() => void onDeveloperLogin()}><KeyRound size={16} />开发人员登录</button>}</div></aside><KnowledgePage identityKind={identity.kind} modelConfig={modelConfig} requireModelConfig={() => { if (identity.kind === "developer" || modelConfig) return true; onOpenModel(); return false; }} /></div>;
 }
 
 function Welcome({ onCreate }: { onCreate: () => void }) {
@@ -123,6 +137,7 @@ function ChatPage(props: ChatPageProps) {
   const [transient, setTransient] = useState<Map<string, TransientMessage>>(new Map());
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [eventsLoaded, setEventsLoaded] = useState(false);
   const [message, setMessage] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
@@ -137,6 +152,9 @@ function ChatPage(props: ChatPageProps) {
     return Number.isFinite(saved) && saved > 0 ? saved : 620;
   });
   const [resizingWorkspace, setResizingWorkspace] = useState(false);
+  const [transitioning, setTransitioning] = useState(false);
+  const runningRef = useRef(false);
+  const autoResumeAttemptedRef = useRef<string | null>(null);
   const current = props.threads.find((thread) => thread.id === threadId);
 
   useEffect(() => {
@@ -145,8 +163,29 @@ function ChatPage(props: ChatPageProps) {
     setTransient(new Map());
     setError(null);
     setStoppedNotice(false);
+    setEventsLoaded(false);
+    autoResumeAttemptedRef.current = null;
     if (!threadId) return;
-    void getEvents(threadId).then((page) => { setEvents(page.events); setHasMore(page.hasMore); }).catch((reason) => setError(reason instanceof ApiError ? reason : new ApiError("时间线加载失败", "EVENTS_FAILED", 500, true)));
+    void getEvents(threadId).then((page) => { setEvents(page.events); setHasMore(page.hasMore); setEventsLoaded(true); }).catch((reason) => setError(reason instanceof ApiError ? reason : new ApiError("时间线加载失败", "EVENTS_FAILED", 500, true)));
+    return () => {
+      if (runningRef.current) {
+        void cancelThreadTask(threadId);
+        abortRef.current?.abort();
+      }
+    };
+  }, [threadId]);
+
+  useEffect(() => {
+    const notifyCancellation = () => {
+      if (!runningRef.current || !threadId) return;
+      void fetch(`/v1/threads/${threadId}/cancel`, {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: true,
+      });
+    };
+    window.addEventListener("pagehide", notifyCancellation);
+    return () => window.removeEventListener("pagehide", notifyCancellation);
   }, [threadId]);
 
   useEffect(() => {
@@ -215,11 +254,12 @@ function ChatPage(props: ChatPageProps) {
     window.localStorage.setItem("resume-workspace-width", String(width));
   };
 
-  const run = async (checkpoint = false, resumeValue?: Record<string, unknown>) => {
-    if (!threadId || running) return;
+  const run = async (checkpoint = false, resumeValue?: Record<string, unknown>, operationId = window.crypto.randomUUID()) => {
+    if (!threadId || runningRef.current) return;
     if (props.identity.kind === "guest" && !props.modelConfig) { props.onOpenModel(); return; }
     const controller = new AbortController();
     abortRef.current = controller;
+    runningRef.current = true;
     setRunning(true);
     setError(null);
     setStoppedNotice(false);
@@ -230,7 +270,7 @@ function ChatPage(props: ChatPageProps) {
       : null;
     if (!checkpoint) setMessage("");
     try {
-      await streamGraph({ threadId, message: outgoingMessage, resumeId: outgoingResumeId, resumeValue, checkpoint, modelConfig: props.modelConfig, signal: controller.signal, onFrame });
+      await streamGraph({ threadId, message: outgoingMessage, resumeId: outgoingResumeId, resumeValue, checkpoint, modelConfig: props.modelConfig, signal: controller.signal, onFrame, operationId });
       if (outgoingResumeId !== null) {
         try {
           await selectThreadResume(threadId, null);
@@ -244,6 +284,11 @@ function ChatPage(props: ChatPageProps) {
       if ((reason as DOMException)?.name === "AbortError") {
         setStoppedNotice(true);
         await props.onThreadsChange();
+      } else if (reason instanceof ApiError && (reason.code === "OPERATION_COMPLETED" || reason.code === "OPERATION_IN_PROGRESS")) {
+        const page = await getEvents(threadId);
+        setEvents(page.events);
+        setHasMore(page.hasMore);
+        await props.onThreadsChange();
       } else {
         if (!checkpoint) setMessage(outgoingMessage);
         setError(reason instanceof ApiError ? reason : new ApiError("连接意外中断", "STREAM_FAILED", 500, true));
@@ -251,8 +296,60 @@ function ChatPage(props: ChatPageProps) {
     } finally {
       setTransient(new Map());
       setRunning(false);
+      runningRef.current = false;
       abortRef.current = null;
     }
+  };
+
+  useEffect(() => {
+    if (!eventsLoaded || current?.status !== "interrupted" || runningRef.current || autoResumeAttemptedRef.current === threadId) return;
+    if (props.identity.kind === "guest" && !props.modelConfig) {
+      props.onOpenModel();
+      return;
+    }
+    const recoveryMarker = `${threadId}:${current.updated_at}`;
+    const markerKey = `ia:auto-resume:${threadId}`;
+    if (window.sessionStorage.getItem(markerKey) === recoveryMarker) return;
+    window.sessionStorage.setItem(markerKey, recoveryMarker);
+    autoResumeAttemptedRef.current = threadId;
+    void run(true);
+  }, [current?.status, current?.updated_at, eventsLoaded, props.identity.kind, props.modelConfig, threadId]);
+
+  const stopTask = async () => {
+    if (!threadId || transitioning) return;
+    autoResumeAttemptedRef.current = threadId;
+    if (current) {
+      window.sessionStorage.setItem(`ia:auto-resume:${threadId}`, `${threadId}:${current.updated_at}`);
+    }
+    setTransitioning(true);
+    try {
+      await cancelThreadTask(threadId);
+      abortRef.current?.abort();
+      setStoppedNotice(true);
+      await props.onThreadsChange();
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("无法中断当前任务", "CANCEL_FAILED", 500, true));
+    } finally {
+      setTransitioning(false);
+    }
+  };
+
+  const leaveCurrentThread = async (action: () => void | Promise<void>) => {
+    if (transitioning) return;
+    if (runningRef.current || current?.status === "running") {
+      setTransitioning(true);
+      try {
+        await cancelThreadTask(threadId);
+        abortRef.current?.abort();
+        await props.onThreadsChange();
+      } catch (reason) {
+        setError(reason instanceof ApiError ? reason : new ApiError("中断失败，已留在当前会话", "CANCEL_FAILED", 500, true));
+        setTransitioning(false);
+        return;
+      }
+      setTransitioning(false);
+    }
+    await action();
   };
 
   const loadOlder = async () => {
@@ -290,24 +387,37 @@ function ChatPage(props: ChatPageProps) {
   };
 
   if (!current) return <Navigate replace to="/" />;
-  const submitDecision = (value: Record<string, unknown>) => void run(false, value);
+  const withInterruptIdentity = (value: Record<string, unknown>) => pending === null
+    ? value
+    : { ...value, phase: pending.phase, interrupt_id: pending.interruptId };
+  const submitDecision = (value: Record<string, unknown>) => void run(false, withInterruptIdentity(value));
   const submitComposer = () => {
     if (pending?.phase === "resume_hitl") {
-      void run(false, { action: "new_request", request: message.trim(), selection: workspaceSelection });
+      void run(false, withInterruptIdentity({ action: "new_request", request: message.trim(), selection: workspaceSelection }));
       return;
     }
     void run(false);
   };
   const decisionLocked = pending !== null && pending.phase !== "resume_hitl";
   const standby = pending?.phase === "resume_hitl";
+  const handleErrorAction = () => {
+    if (!error) return;
+    if (error.code === "CANCEL_PENDING" || error.code === "CANCEL_FAILED") {
+      void stopTask();
+    } else if (error.activeThreadId) {
+      void leaveCurrentThread(() => navigate(`/threads/${error.activeThreadId}`));
+    } else {
+      void run(true);
+    }
+  };
   const shellStyle = resumeActive ? { "--resume-workspace-width": `${workspaceWidth}px` } as CSSProperties : undefined;
   return <div ref={shellRef} style={shellStyle} className={`app-shell ${resumeActive ? "with-resume-workspace" : ""}`}>
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark">IA</div><span>Interview Assistant</span></div>
-      <button className="new-thread" onClick={() => void props.onCreate()}><MessageSquarePlus size={17} />新建会话</button>
-      <button className="knowledge-nav" onClick={() => navigate("/knowledge")}><BookOpen size={16} />知识库</button>
+      <button className="new-thread" disabled={transitioning} onClick={() => void leaveCurrentThread(props.onCreate)}><MessageSquarePlus size={17} />{transitioning ? "正在中断…" : "新建会话"}</button>
+      <button className="knowledge-nav" disabled={transitioning} onClick={() => void leaveCurrentThread(() => navigate("/knowledge"))}><BookOpen size={16} />知识库</button>
       <div className="sidebar-label">最近会话</div>
-      <nav className="thread-list">{props.threads.map((thread) => <div className={`thread-item ${thread.id === threadId ? "active" : ""}`} key={thread.id}><button className="thread-link" onClick={() => navigate(`/threads/${thread.id}`)}><span>{thread.title}</span><small>{thread.status === "running" ? "执行中" : thread.status === "waiting" ? "待确认" : thread.status === "interrupted" ? "已中断" : "就绪"}</small></button><div className="thread-actions"><button title="重命名" onClick={() => void rename(thread)}><MoreHorizontal size={15} /></button><button title="删除" onClick={() => void remove(thread)}><Trash2 size={14} /></button></div></div>)}</nav>
+      <nav className="thread-list">{props.threads.map((thread) => <div className={`thread-item ${thread.id === threadId ? "active" : ""}`} key={thread.id}><button className="thread-link" disabled={transitioning} onClick={() => void leaveCurrentThread(() => navigate(`/threads/${thread.id}`))}><span>{thread.title}</span><small>{threadStatusLabel(thread.status)}</small></button><div className="thread-actions"><button title="重命名" onClick={() => void rename(thread)}><MoreHorizontal size={15} /></button><button title="删除" onClick={() => void remove(thread)}><Trash2 size={14} /></button></div></div>)}</nav>
       <div className="sidebar-footer">
         <button onClick={props.onOpenModel}><Settings2 size={16} />{props.identity.kind === "developer" ? "开发环境配置" : "模型配置"}</button>
         {props.identity.kind === "developer" ? <button onClick={() => void props.onRestoreGuest()}><LogOut size={16} />返回游客模式</button> : props.developerEnabled && <button onClick={() => void props.onDeveloperLogin()}><KeyRound size={16} />开发人员登录</button>}
@@ -318,14 +428,14 @@ function ChatPage(props: ChatPageProps) {
     <main className="chat-panel">
       <header className="chat-header"><div><h1>{current.title}</h1><span>{props.identity.kind === "developer" ? "开发人员模式 · 使用服务端配置" : "游客模式 · 使用当前会话模型配置"}</span></div></header>
       <Timeline events={events} transient={[...transient.values()]} hasMore={hasMore} loadingOlder={loadingOlder} onLoadOlder={() => void loadOlder()} pendingInterrupt={pending} running={running} selection={workspaceSelection} onDecision={submitDecision} />
-      {error && <div className="error-bar"><span>{error.message}</span>{error.retryable && <button onClick={() => void run(true)}>从检查点重试</button>}</div>}
-      {stoppedNotice && <div className="resume-bar">已停止显示；后端将在当前节点结束后保存中断检查点。</div>}
-      {current.status === "interrupted" && !running && <div className="resume-bar">上次执行已中断。<button onClick={() => void run(true)}>从最近检查点继续</button></div>}
+      {error && <div className="error-bar"><span>{error.message}</span>{error.retryable && <button onClick={handleErrorAction}>{error.code.startsWith("CANCEL_") ? "重试中断" : error.activeThreadId ? "查看执行中会话" : "从检查点重试"}</button>}</div>}
+      {stoppedNotice && <div className="resume-bar">任务已中断；下次重新进入该会话时会从最近检查点自动恢复。</div>}
+      {current.status === "interrupted" && running && <div className="resume-bar">正在从最近检查点自动恢复…</div>}
       <div className="composer-shell">
         <div className="agent-recipient">发送给 {current.active_agent === "resume" ? "Resume Agent" : current.active_agent === "research" ? "Research Agent" : "Main Agent"}{standby ? " · 可继续提出修改需求" : ""}</div>
         {pickerOpen && <ResumePicker selectedId={current.selected_resume_id} onSelect={selectResume} onClear={clearResume} onClose={() => setPickerOpen(false)} />}
         {selectedResume && <div className="resume-chip"><FileText size={13} />{selectedResume.display_name}<button title="取消指定" onClick={() => void clearResume()}><X size={12} /></button></div>}
-        <div className="composer"><button className="attach-resume" title="指定简历" disabled={running || current.active_agent === "resume"} onClick={() => setPickerOpen((open) => !open)}><Paperclip size={17} /></button><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (message.trim() && !decisionLocked) submitComposer(); } }} placeholder={decisionLocked ? "请先完成当前审批" : standby ? "继续告诉 Resume Agent 还需要修改什么" : "输入消息，Enter 发送，Shift + Enter 换行"} disabled={running || decisionLocked} /><button aria-label={running ? "停止生成" : "发送消息"} className={running ? "stop-button" : "send-button"} disabled={!running && (!message.trim() || decisionLocked)} onClick={() => running ? abortRef.current?.abort() : submitComposer()}>{running ? <Square size={17} fill="currentColor" /> : <Send size={18} />}</button></div>
+        <div className="composer"><button className="attach-resume" title="指定简历" disabled={running || current.active_agent === "resume"} onClick={() => setPickerOpen((open) => !open)}><Paperclip size={17} /></button><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (message.trim() && !decisionLocked) submitComposer(); } }} placeholder={decisionLocked ? "请先完成当前审批" : standby ? "继续告诉 Resume Agent 还需要修改什么" : "输入消息，Enter 发送，Shift + Enter 换行"} disabled={running || decisionLocked} /><button aria-label={running ? "中断任务" : "发送消息"} className={running ? "stop-button" : "send-button"} disabled={transitioning || (!running && (!message.trim() || decisionLocked))} onClick={() => running ? void stopTask() : submitComposer()}>{running ? <Square size={17} fill="currentColor" /> : <Send size={18} />}</button></div>
       </div>
     </main>
   </div>;

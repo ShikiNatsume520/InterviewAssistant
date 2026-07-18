@@ -8,6 +8,7 @@ export interface ResumeWorkspaceSnapshot {
 
 export interface PendingInterrupt {
   eventId: string;
+  interruptId: string;
   phase: string;
   data: Record<string, unknown>;
   workspace: ResumeWorkspaceSnapshot | null;
@@ -21,13 +22,14 @@ function interruptData(event: ProductEvent): Record<string, unknown> | null {
 
 function resumeInterrupt(event: ProductEvent): PendingInterrupt | null {
   const data = interruptData(event);
-  if (!data || typeof data.phase !== "string") return null;
+  if (!data || typeof data.phase !== "string" || typeof data.interrupt_id !== "string") return null;
   const rawWorkspace = data.workspace;
   const workspace = typeof rawWorkspace === "object" && rawWorkspace !== null
     ? rawWorkspace as Record<string, unknown>
     : null;
   return {
     eventId: event.eventId,
+    interruptId: data.interrupt_id,
     phase: data.phase,
     data,
     workspace: workspace && typeof workspace.draft === "string"
@@ -41,13 +43,22 @@ function resumeInterrupt(event: ProductEvent): PendingInterrupt | null {
 }
 
 export function pendingInterrupt(events: ProductEvent[]): PendingInterrupt | null {
-  let pending: ProductEvent | null = null;
+  let pending: PendingInterrupt | null = null;
   for (const event of events) {
-    if (event.type === "interrupt.requested") pending = event;
-    if (event.type === "interrupt.resolved") pending = null;
+    if (event.type === "interrupt.requested") {
+      pending = resumeInterrupt(event);
+      continue;
+    }
+    if (event.type !== "interrupt.resolved" || pending === null) continue;
+    const decision = event.payload.decision;
+    const decisionId = typeof event.payload.interruptId === "string"
+      ? event.payload.interruptId
+      : typeof decision === "object" && decision !== null
+        ? String((decision as Record<string, unknown>).interrupt_id ?? "")
+        : "";
+    if (decisionId === pending.interruptId) pending = null;
   }
-  if (!pending) return null;
-  return resumeInterrupt(pending);
+  return pending;
 }
 
 export function latestResumeWorkspace(events: ProductEvent[]): PendingInterrupt | null {
@@ -61,6 +72,7 @@ export function latestResumeWorkspace(events: ProductEvent[]): PendingInterrupt 
     if (event.type !== "interrupt.resolved" || latest?.phase !== "resume_approve") continue;
     const decision = event.payload.decision;
     if (typeof decision !== "object" || decision === null) continue;
+    if (String((decision as Record<string, unknown>).interrupt_id ?? "") !== latest.interruptId) continue;
     const action = String((decision as Record<string, unknown>).action ?? "");
     const draft = action === "approve" && typeof latest.data.after === "string"
       ? latest.data.after

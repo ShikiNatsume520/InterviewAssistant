@@ -22,10 +22,13 @@ from agents.research.tools.web_search import connectivity_probe, search
 from kernel.config import RESEARCH_MODEL
 from kernel.contracts import (
     ConnectivityCheckPayload,
+    ConnectivityInbound,
     DecisionInbound,
     OutlineConfirmPayload,
     ResearchKnowledgeConfirmPayload,
     ResearchKnowledgeDecisionInbound,
+    ensure_interrupt_identity,
+    make_interrupt_id,
 )
 from kernel.llm import get_chat_model
 from kernel.logging import dlog
@@ -76,11 +79,20 @@ def outline_node(state: ResearchState) -> dict[str, Any]:
 
 def outline_confirm_node(state: ResearchState) -> dict[str, Any]:
     """挂起并处理用户对研究计划的批准、调整或拒绝。"""
-    value = interrupt(
-        OutlineConfirmPayload(
-            gap_topic=state.get("gap_topic", ""),
-            outline=state.get("outline", []),
-        ).model_dump()
+    payload = OutlineConfirmPayload(
+        interrupt_id=make_interrupt_id(
+            "research",
+            state.get("thread_id", ""),
+            state.get("tool_call_id", ""),
+            "outline_confirm",
+            json.dumps(state.get("outline", []), ensure_ascii=False),
+        ),
+        gap_topic=state.get("gap_topic", ""),
+        outline=state.get("outline", []),
+    )
+    value = interrupt(payload.model_dump())
+    ensure_interrupt_identity(
+        value, phase=payload.phase, interrupt_id=payload.interrupt_id
     )
     inbound = DecisionInbound.model_validate(value if isinstance(value, dict) else {})
     if inbound.action == "suggest":
@@ -110,6 +122,13 @@ def connectivity_check_node(state: ResearchState) -> dict[str, Any]:
         "connect_attempts": attempts,
         "connectivity_ok": False,
         "_pending_interrupt": ConnectivityCheckPayload(
+            interrupt_id=make_interrupt_id(
+                "research",
+                state.get("thread_id", ""),
+                state.get("tool_call_id", ""),
+                "connectivity_check",
+                attempts,
+            ),
             attempts=attempts,
             msg=(
                 f"无法连接 DuckDuckGo（第 {attempts} 次），请检查网络后继续；"
@@ -122,7 +141,14 @@ def connectivity_check_node(state: ResearchState) -> dict[str, Any]:
 
 def connectivity_interrupt_node(state: ResearchState) -> dict[str, Any]:
     """等待用户处理网络问题后继续。"""
-    interrupt(state.get("_pending_interrupt") or {})
+    payload = state.get("_pending_interrupt") or {}
+    value = interrupt(payload)
+    ensure_interrupt_identity(
+        value,
+        phase=str(payload.get("phase", "")),
+        interrupt_id=str(payload.get("interrupt_id", "")),
+    )
+    ConnectivityInbound.model_validate(value)
     return {}
 
 
@@ -348,20 +374,29 @@ def compose_report_node(state: ResearchState) -> dict[str, Any]:
     }
 
 
-def knowledge_confirm_node(state: ResearchState) -> dict[str, Any]:
-    """询问是否授权入库，仅记录决定，不执行导入。"""
+def _knowledge_payload(state: ResearchState) -> ResearchKnowledgeConfirmPayload:
+    """构造本次研究唯一且可重放的知识入库审批。"""
     succeeded = sum(
         source["status"] == "succeeded" for source in state.get("sources", [])
     )
-    value = interrupt(
-        ResearchKnowledgeConfirmPayload(
-            topic=state.get("gap_topic", ""),
-            title=f"深研结果：{state.get('gap_topic', '')}",
-            summary=state.get("report_summary", ""),
-            source_count=succeeded,
-            proposed_file_name=state.get("proposed_file_name", ""),
-        ).model_dump()
+    return ResearchKnowledgeConfirmPayload(
+        interrupt_id=make_interrupt_id(
+            "research",
+            state.get("thread_id", ""),
+            state.get("tool_call_id", ""),
+            "research_knowledge_confirm",
+            1,
+        ),
+        topic=state.get("gap_topic", ""),
+        title=f"深研结果：{state.get('gap_topic', '')}",
+        summary=state.get("report_summary", ""),
+        source_count=succeeded,
+        proposed_file_name=state.get("proposed_file_name", ""),
     )
+
+
+def _apply_knowledge_decision(value: Any) -> dict[str, Any]:
+    """把已通过身份校验的知识库决定映射为状态更新。"""
     inbound = ResearchKnowledgeDecisionInbound.model_validate(
         value if isinstance(value, dict) else {}
     )
@@ -371,13 +406,42 @@ def knowledge_confirm_node(state: ResearchState) -> dict[str, Any]:
             "import_status": "pending",
             "approval_status": "approved",
             "phase": "completed",
+            "knowledge_interrupt_rearm": False,
         }
     return {
         "knowledge_decision": "rejected",
         "import_status": "not_requested",
         "approval_status": "approved",
         "phase": "completed",
+        "knowledge_interrupt_rearm": False,
     }
+
+
+def knowledge_confirm_node(state: ResearchState) -> dict[str, Any]:
+    """询问是否授权入库；旧恢复值错配时转入独立重挂起节点。"""
+    payload = _knowledge_payload(state)
+    value = interrupt(payload.model_dump())
+    try:
+        ensure_interrupt_identity(
+            value, phase=payload.phase, interrupt_id=payload.interrupt_id
+        )
+    except ValueError:
+        return {
+            "knowledge_decision": "pending",
+            "knowledge_interrupt_rearm": True,
+            "phase": "waiting_knowledge_decision",
+        }
+    return _apply_knowledge_decision(value)
+
+
+def knowledge_confirm_rearm_node(state: ResearchState) -> dict[str, Any]:
+    """在新的 LangGraph task 中重新挂起，隔离先前审批的 resume scratchpad。"""
+    payload = _knowledge_payload(state)
+    value = interrupt(payload.model_dump())
+    ensure_interrupt_identity(
+        value, phase=payload.phase, interrupt_id=payload.interrupt_id
+    )
+    return _apply_knowledge_decision(value)
 
 
 async def import_knowledge_node(state: ResearchState) -> dict[str, Any]:
@@ -403,7 +467,11 @@ async def import_knowledge_node(state: ResearchState) -> dict[str, Any]:
 
 def route_after_knowledge_confirm(state: ResearchState) -> str:
     """仅在用户批准时进入正式知识导入节点。"""
-    return "import_knowledge" if state.get("knowledge_decision") == "approved" else "end"
+    if state.get("knowledge_interrupt_rearm"):
+        return "knowledge_confirm_rearm"
+    return (
+        "import_knowledge" if state.get("knowledge_decision") == "approved" else "end"
+    )
 
 
 def abort_node(state: ResearchState) -> dict[str, Any]:
@@ -433,6 +501,7 @@ def build_research_workflow() -> Any:
     workflow.add_node("prepare_report", prepare_report_node)
     workflow.add_node("compose_report", compose_report_node)
     workflow.add_node("knowledge_confirm", knowledge_confirm_node)
+    workflow.add_node("knowledge_confirm_rearm", knowledge_confirm_rearm_node)
     workflow.add_node("import_knowledge", import_knowledge_node)
     workflow.add_node("abort", abort_node)
     workflow.add_edge(START, "outline")
@@ -494,7 +563,20 @@ def build_research_workflow() -> Any:
     workflow.add_conditional_edges(
         "knowledge_confirm",
         route_after_knowledge_confirm,
-        {"import_knowledge": "import_knowledge", "end": END},
+        {
+            "knowledge_confirm_rearm": "knowledge_confirm_rearm",
+            "import_knowledge": "import_knowledge",
+            "end": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "knowledge_confirm_rearm",
+        route_after_knowledge_confirm,
+        {
+            "knowledge_confirm_rearm": "knowledge_confirm_rearm",
+            "import_knowledge": "import_knowledge",
+            "end": END,
+        },
     )
     workflow.add_edge("import_knowledge", END)
     workflow.add_edge("abort", END)

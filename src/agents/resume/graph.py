@@ -72,6 +72,8 @@ from kernel.contracts import (
     PlanConfirmPayload,
     ResumeApprovePayload,
     ResumeHitlPayload,
+    ensure_interrupt_identity,
+    make_interrupt_id,
 )
 from kernel.llm import get_chat_model
 from kernel.logging import dlog
@@ -254,7 +256,20 @@ def plan_confirm_node(state: ResumeState) -> dict[str, Any]:
     """人机交互：interrupt 等用户审阅计划（approve / suggest）。"""
     plan = state.get("plan", [])
     dlog("resume", "plan_confirm_node", "interrupt 等待用户确认计划", plan_n=len(plan))
-    value = interrupt(PlanConfirmPayload(plan=plan).model_dump())
+    payload = PlanConfirmPayload(
+        interrupt_id=make_interrupt_id(
+            "resume",
+            state.get("resume_session_id", ""),
+            "plan_confirm",
+            state.get("plan_request_tool_call_id") or "",
+            json.dumps(plan, ensure_ascii=False),
+        ),
+        plan=plan,
+    )
+    value = interrupt(payload.model_dump())
+    ensure_interrupt_identity(
+        value, phase=payload.phase, interrupt_id=payload.interrupt_id
+    )
     dlog("resume", "plan_confirm_node", "收到用户回复", value=value)
     # server 已归一化为 {action: approve|suggest, suggestion?, selection?}
     inbound = DecisionInbound.model_validate(value if isinstance(value, dict) else {})
@@ -468,19 +483,27 @@ def approve_node(state: ResumeState) -> dict[str, Any]:
         before_len=len(before),
         after_len=len(after),
     )
-    value = interrupt(
-        ResumeApprovePayload(
-            edit_id=current["id"],
-            ordinal=ordinal,
-            total=max(len(all_edits), 1),
-            section=current["section"],
-            reason=current["reason"],
-            before_text=current["grep_target"],
-            after_text=current["replace_content"],
-            before=before,
-            after=after,
-            edits=edits,
-        ).model_dump()
+    payload = ResumeApprovePayload(
+        interrupt_id=make_interrupt_id(
+            "resume",
+            state.get("resume_session_id", ""),
+            "resume_approve",
+            current["id"],
+        ),
+        edit_id=current["id"],
+        ordinal=ordinal,
+        total=max(len(all_edits), 1),
+        section=current["section"],
+        reason=current["reason"],
+        before_text=current["grep_target"],
+        after_text=current["replace_content"],
+        before=before,
+        after=after,
+        edits=edits,
+    )
+    value = interrupt(payload.model_dump())
+    ensure_interrupt_identity(
+        value, phase=payload.phase, interrupt_id=payload.interrupt_id
     )
     dlog("resume", "approve_node", "收到用户回复", value=value)
     preview = current["grep_target"][:50] + (
@@ -536,8 +559,19 @@ def route_after_approve(state: ResumeState) -> str:
 def hitl_standby_node(state: ResumeState) -> dict[str, Any]:
     """常驻待命：interrupt 挂起，等 new_request（注入 HumanMessage）或 exit（设 save）。"""
     dlog("resume", "hitl_standby_node", "interrupt 等待用户信号（新请求/结束）")
-    value = interrupt(
-        ResumeHitlPayload(summary=state.get("last_summary", "")).model_dump()
+    payload = ResumeHitlPayload(
+        interrupt_id=make_interrupt_id(
+            "resume",
+            state.get("resume_session_id", ""),
+            "resume_hitl",
+            len(state.get("messages", [])),
+            len(state.get("processed_edits", [])),
+        ),
+        summary=state.get("last_summary", ""),
+    )
+    value = interrupt(payload.model_dump())
+    ensure_interrupt_identity(
+        value, phase=payload.phase, interrupt_id=payload.interrupt_id
     )
     dlog("resume", "hitl_standby_node", "收到用户信号", value=value)
     # server 已归一化为 {action: new_request|exit, request?, selection?, save?}

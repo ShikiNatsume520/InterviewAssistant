@@ -68,14 +68,32 @@ def test_approved_plan_returns_tool_result_before_editing(monkeypatch: Any) -> N
 
     first = graph.invoke(initial, config)
     assert first["__interrupt__"][0].value["phase"] == "plan_confirm"
+    first_payload = first["__interrupt__"][0].value
 
     revised = graph.invoke(
-        Command(resume={"action": "suggest", "suggestion": "突出技术结果"}),
+        Command(
+            resume={
+                "action": "suggest",
+                "suggestion": "突出技术结果",
+                "phase": first_payload["phase"],
+                "interrupt_id": first_payload["interrupt_id"],
+            }
+        ),
         config,
     )
     assert revised["__interrupt__"][0].value["phase"] == "plan_confirm"
+    revised_payload = revised["__interrupt__"][0].value
 
-    approved = graph.invoke(Command(resume={"action": "approve"}), config)
+    approved = graph.invoke(
+        Command(
+            resume={
+                "action": "approve",
+                "phase": revised_payload["phase"],
+                "interrupt_id": revised_payload["interrupt_id"],
+            }
+        ),
+        config,
+    )
     assert approved["__interrupt__"][0].value["phase"] == "resume_approve"
     messages = graph.get_state(config).values["messages"]
 

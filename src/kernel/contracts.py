@@ -13,6 +13,7 @@ Pydantic schema，改协议有编译期保障。序列化字段名与重构前�
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -21,11 +22,28 @@ from pydantic import BaseModel, Field
 # 子图发出的 interrupt payload
 # --------------------------------------------------------------------------- #
 
+_INTERRUPT_NAMESPACE = uuid.UUID("d093e9d8-8778-51c4-b036-44adb608748c")
+
+
+def make_interrupt_id(*parts: str | int) -> str:
+    """根据稳定业务身份生成可跨 checkpoint 重跑复用的 Interrupt ID。"""
+    key = ":".join(str(part) for part in parts)
+    return str(uuid.uuid5(_INTERRUPT_NAMESPACE, key))
+
+
+def ensure_interrupt_identity(value: Any, *, phase: str, interrupt_id: str) -> None:
+    """拒绝属于其他审批点的 LangGraph resume 值。"""
+    if not isinstance(value, dict):
+        raise ValueError("interrupt response must be an object")
+    if value.get("phase") != phase or value.get("interrupt_id") != interrupt_id:
+        raise ValueError("interrupt response identity mismatch")
+
 
 class PlanConfirmPayload(BaseModel):
     """``resume_agent`` 的 ``plan_confirm_node`` interrupt payload。"""
 
     phase: Literal["plan_confirm"] = "plan_confirm"
+    interrupt_id: str
     plan: list[str] = Field(default_factory=list, description="计划步骤列表")
 
 
@@ -43,6 +61,7 @@ class ResumeApprovePayload(BaseModel):
     """``resume_agent`` 常驻会话 ``approve_node`` interrupt payload。"""
 
     phase: Literal["resume_approve"] = "resume_approve"
+    interrupt_id: str
     edit_id: str = Field(default="", description="稳定 tool_call_id")
     ordinal: int = Field(default=1, ge=1, description="当前候选序号")
     total: int = Field(default=1, ge=1, description="当前批次候选总数")
@@ -62,6 +81,7 @@ class ResumeHitlPayload(BaseModel):
     """``resume_agent`` 常驻会话 ``hitl_standby_node`` interrupt payload。"""
 
     phase: Literal["resume_hitl"] = "resume_hitl"
+    interrupt_id: str
     summary: str = Field(default="", description="chat_node 产出的本次会话总结")
 
 
@@ -69,6 +89,7 @@ class OutlineConfirmPayload(BaseModel):
     """``research_agent`` 的 ``outline_confirm_node`` interrupt payload。"""
 
     phase: Literal["outline_confirm"] = "outline_confirm"
+    interrupt_id: str
     gap_topic: str = Field(default="", description="知识缺口主题")
     outline: list[str] = Field(default_factory=list, description="检索词大纲")
 
@@ -77,6 +98,7 @@ class ConnectivityCheckPayload(BaseModel):
     """``research_agent`` 的 ``connectivity_check_node`` interrupt payload。"""
 
     phase: Literal["connectivity_check"] = "connectivity_check"
+    interrupt_id: str
     attempts: int = Field(default=0, description="连通性失败累计次数")
     msg: str = Field(default="", description="提示文案")
 
@@ -85,6 +107,7 @@ class ResearchKnowledgeConfirmPayload(BaseModel):
     """研究报告完成后的个人知识库授权确认。"""
 
     phase: Literal["research_knowledge_confirm"] = "research_knowledge_confirm"
+    interrupt_id: str
     topic: str = Field(default="", description="研究主题")
     title: str = Field(default="", description="报告标题")
     summary: str = Field(default="", description="报告摘要")
@@ -114,6 +137,8 @@ class DecisionInbound(BaseModel):
     """
 
     action: Literal["approve", "reject", "suggest"]
+    phase: str
+    interrupt_id: str
     suggestion: str = Field(default="", description="建议内容（suggest 时填）")
     selection: str = Field(default="", description="选区提示（resume 场景可选）")
 
@@ -122,6 +147,8 @@ class HitlInbound(BaseModel):
     """``resume_hitl`` 的 inbound：常驻会话待命时的用户信号。"""
 
     action: Literal["new_request", "exit"]
+    phase: Literal["resume_hitl"]
+    interrupt_id: str
     request: str = Field(default="", description="新修改意图（new_request 时填）")
     selection: str = Field(default="", description="选区提示（可选）")
     save: bool = Field(default=False, description="保存退出（exit 时填）")
@@ -131,12 +158,16 @@ class ConnectivityInbound(BaseModel):
     """``connectivity_check`` 的 inbound：用户挂梯子后继续。"""
 
     action: Literal["continue"]
+    phase: Literal["connectivity_check"]
+    interrupt_id: str
 
 
 class ResearchKnowledgeDecisionInbound(BaseModel):
     """研究报告是否授权加入个人知识库。"""
 
     action: Literal["approve", "reject"]
+    phase: Literal["research_knowledge_confirm"]
+    interrupt_id: str
 
 
 PHASE_TO_INBOUND: dict[str, type[BaseModel]] = {

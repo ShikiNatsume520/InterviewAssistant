@@ -84,6 +84,7 @@ export interface ApiErrorBody {
     code?: string;
     message?: string;
     retryable?: boolean;
+    activeThreadId?: string | null;
   };
 }
 
@@ -91,12 +92,14 @@ export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
   readonly retryable: boolean;
+  readonly activeThreadId: string | null;
 
-  constructor(message: string, code: string, status: number, retryable = false) {
+  constructor(message: string, code: string, status: number, retryable = false, activeThreadId: string | null = null) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
     this.retryable = retryable;
+    this.activeThreadId = activeThreadId;
   }
 }
