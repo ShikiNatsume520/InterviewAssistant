@@ -217,9 +217,21 @@ function ChatPage(props: ChatPageProps) {
     setError(null);
     setStoppedNotice(false);
     const outgoingMessage = message;
+    const consumesSelectedResume = !checkpoint && resumeValue === undefined;
+    const outgoingResumeId = consumesSelectedResume
+      ? current?.selected_resume_id ?? null
+      : null;
     if (!checkpoint) setMessage("");
     try {
-      await streamGraph({ threadId, message: outgoingMessage, resumeId: current?.selected_resume_id ?? null, resumeValue, checkpoint, modelConfig: props.modelConfig, signal: controller.signal, onFrame });
+      await streamGraph({ threadId, message: outgoingMessage, resumeId: outgoingResumeId, resumeValue, checkpoint, modelConfig: props.modelConfig, signal: controller.signal, onFrame });
+      if (outgoingResumeId !== null) {
+        try {
+          await selectThreadResume(threadId, null);
+          setSelectedResume(null);
+        } catch {
+          setError(new ApiError("消息已发送，但简历选择未能自动清除", "RESUME_SELECTION_CLEAR_FAILED", 500, false));
+        }
+      }
       await props.onThreadsChange();
     } catch (reason) {
       if ((reason as DOMException)?.name === "AbortError") {
@@ -302,7 +314,7 @@ function ChatPage(props: ChatPageProps) {
       {stoppedNotice && <div className="resume-bar">已停止显示；后端将在当前节点结束后保存中断检查点。</div>}
       {current.status === "interrupted" && !running && <div className="resume-bar">上次执行已中断。<button onClick={() => void run(true)}>从最近检查点继续</button></div>}
       <div className="composer-shell">
-        <div className="agent-recipient">发送给 {current.active_agent === "resume" ? "Resume Agent" : "Main Agent"}{standby ? " · 可继续提出修改需求" : ""}</div>
+        <div className="agent-recipient">发送给 {current.active_agent === "resume" ? "Resume Agent" : current.active_agent === "research" ? "Research Agent" : "Main Agent"}{standby ? " · 可继续提出修改需求" : ""}</div>
         {pickerOpen && <ResumePicker selectedId={current.selected_resume_id} onSelect={selectResume} onClear={clearResume} onClose={() => setPickerOpen(false)} />}
         {selectedResume && <div className="resume-chip"><FileText size={13} />{selectedResume.display_name}<button title="取消指定" onClick={() => void clearResume()}><X size={12} /></button></div>}
         <div className="composer"><button className="attach-resume" title="指定简历" disabled={running || current.active_agent === "resume"} onClick={() => setPickerOpen((open) => !open)}><Paperclip size={17} /></button><textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (message.trim() && !decisionLocked) submitComposer(); } }} placeholder={decisionLocked ? "请先完成当前审批" : standby ? "继续告诉 Resume Agent 还需要修改什么" : "输入消息，Enter 发送，Shift + Enter 换行"} disabled={running || decisionLocked} /><button aria-label={running ? "停止生成" : "发送消息"} className={running ? "stop-button" : "send-button"} disabled={!running && (!message.trim() || decisionLocked)} onClick={() => running ? abortRef.current?.abort() : submitComposer()}>{running ? <Square size={17} fill="currentColor" /> : <Send size={18} />}</button></div>

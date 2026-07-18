@@ -81,6 +81,17 @@ class ConnectivityCheckPayload(BaseModel):
     msg: str = Field(default="", description="提示文案")
 
 
+class ResearchKnowledgeConfirmPayload(BaseModel):
+    """研究报告完成后的个人知识库授权确认。"""
+
+    phase: Literal["research_knowledge_confirm"] = "research_knowledge_confirm"
+    topic: str = Field(default="", description="研究主题")
+    title: str = Field(default="", description="报告标题")
+    summary: str = Field(default="", description="报告摘要")
+    source_count: int = Field(default=0, ge=0, description="有效来源数量")
+    proposed_file_name: str = Field(default="", description="建议入库文件名")
+
+
 # --------------------------------------------------------------------------- #
 # 用户回复的 resume 值（inbound）
 # --------------------------------------------------------------------------- #
@@ -122,12 +133,19 @@ class ConnectivityInbound(BaseModel):
     action: Literal["continue"]
 
 
+class ResearchKnowledgeDecisionInbound(BaseModel):
+    """研究报告是否授权加入个人知识库。"""
+
+    action: Literal["approve", "reject"]
+
+
 PHASE_TO_INBOUND: dict[str, type[BaseModel]] = {
     "resume_approve": DecisionInbound,
     "plan_confirm": DecisionInbound,
     "outline_confirm": DecisionInbound,
     "resume_hitl": HitlInbound,
     "connectivity_check": ConnectivityInbound,
+    "research_knowledge_confirm": ResearchKnowledgeDecisionInbound,
 }
 """inbound phase → schema 映射。server 归一化 + 校验、节点解析共用。"""
 
@@ -150,7 +168,12 @@ def normalize_resume_value(phase: str, value: Any) -> Any:
         return value
 
     # 决策类：resume_approve / plan_confirm / outline_confirm
-    if phase in ("resume_approve", "plan_confirm", "outline_confirm"):
+    if phase in (
+        "resume_approve",
+        "plan_confirm",
+        "outline_confirm",
+        "research_knowledge_confirm",
+    ):
         if isinstance(value, dict):
             # 旧 dict 用 decision 字段 → 映射到 action
             if "decision" in value and "action" not in value:

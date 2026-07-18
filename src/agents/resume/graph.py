@@ -27,8 +27,8 @@
               │       ├─ reject → +"user refuse xxx" → hitl_standby
               │       └─ suggest(+selection) → +"user refuse xxx and his suggestion is xxx" → chat_node
               ├─ request_plan → plan_node → plan_confirm(interrupt)
-              │                                ├─ suggest(+selection) → plan_node（注入建议重规划）
-              │                                └─ approve → chat_node
+              │                                ├─ suggest(+selection) → plan_node（状态反馈重规划）
+              │                                └─ approve → plan_result(ToolMessage) → chat_node
               └─ 无 tool_call → hitl_standby(interrupt)
                                   ├─ new_request(+selection) → chat_node
                                   ├─ exit(save=True)  → persist_node(创建派生简历) → END
@@ -57,13 +57,13 @@ from typing import Any
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
 from agents.resume.prompts import build_chat_prompt, build_plan_prompt
 from agents.resume.state import ResumeState
 from agents.resume.tools.edit import EDIT_TOOLS, _apply_grep_replace
+from agents.resume.tools.planning import request_plan
 from kernel.config import RESUME_MODEL
 from kernel.contracts import (
     DecisionInbound,
@@ -76,21 +76,6 @@ from kernel.contracts import (
 from kernel.llm import get_chat_model
 from kernel.logging import dlog
 from kernel.resumes import ResumeRepository
-
-# --------------------------------------------------------------------------- #
-# 动作工具：request_plan（仅作路由信号，被路由拦截，不进 ToolNode）
-# --------------------------------------------------------------------------- #
-
-
-@tool
-def request_plan() -> str:
-    """当修改较复杂、或没把握理解用户意图时调用，进入计划流程让用户协同制定计划。
-
-    本工具不执行任何修改——调用后系统会进入 plan_node 让 LLM 产出修改计划，
-    并经 plan_confirm 请用户审阅。调用即表示「当前请求需要先做计划」。
-    """
-    raise RuntimeError("request_plan tool 不应被执行——应由 route_after_chat 拦截")
-
 
 # --------------------------------------------------------------------------- #
 # 派生简历持久化
@@ -220,18 +205,16 @@ def _extract_last_intent(state: ResumeState) -> str:
 def plan_node(state: ResumeState) -> dict[str, Any]:
     """LLM 据简历 + 最新请求产出修改计划（步骤列表），存 ``plan``。
 
-    进入本节点意味着 chat_node 调用了 ``request_plan``——其产出的
-    AIMessage(tool_calls=[request_plan]) 必须被 ToolMessage 响应，否则后续
-    chat_node 再次 invoke 时 OpenAI 会因「tool_calls 未被响应」报 400。故本节点
-    在产出计划的同时，补一条 ToolMessage 响应 ``request_plan`` 的 tool_call_id
-    （与主图子 agent wrapper 必须返 ToolMessage 同理）。
-
-    suggest 回到本节点重规划时 ``messages[-1]`` 是 HumanMessage（无 tool_calls），
-    不补——避免孤儿 ToolMessage。
+    本节点和 plan_confirm 的建议循环都不修改 messages。只有用户批准后，
+    plan_result_node 才用原始 tool_call_id 返回最终 ToolMessage，保证 chat_node
+    明确得知计划已批准且消息协议连续。
     """
     plan_llm = get_chat_model(RESUME_MODEL)
     resume = state.get("resume_shot", "")
     intent = _extract_last_intent(state)
+    feedback = state.get("plan_feedback", "").strip()
+    if feedback:
+        intent += f"\n\n用户对计划的最新建议：{feedback}"
     dlog("resume", "plan_node", "进入规划", intent=intent, resume_len=len(resume))
     resp = plan_llm.invoke(build_plan_prompt(resume=resume, intent=intent))
     raw = resp.content if isinstance(resp.content, str) else str(resp.content)
@@ -252,21 +235,19 @@ def plan_node(state: ResumeState) -> dict[str, Any]:
         steps = ["按用户请求直接优化简历内容"]
     dlog("resume", "plan_node", "规划完成", steps_n=len(steps), steps=steps)
 
-    out: dict[str, Any] = {"plan": steps}
-    # 补 ToolMessage 响应 chat_node 的 request_plan tool_call（若有）
-    msgs = state.get("messages", [])
-    if msgs:
-        last = msgs[-1]
-        tcs = getattr(last, "tool_calls", []) or []
-        if tcs:
-            tc_id = str(tcs[0].get("id", "request_plan"))
-            out["messages"] = [
-                ToolMessage(
-                    content=f"已进入计划流程，生成计划: {steps}",
-                    tool_call_id=tc_id,
-                )
-            ]
-    return out
+    call_id = state.get("plan_request_tool_call_id")
+    if not call_id:
+        msgs = state.get("messages", [])
+        if msgs:
+            tcs = getattr(msgs[-1], "tool_calls", []) or []
+            if tcs and str(tcs[0].get("name", "")) == "request_plan":
+                call_id = str(tcs[0].get("id", "request_plan"))
+    return {
+        "plan": steps,
+        "plan_status": "draft",
+        "plan_feedback": "",
+        "plan_request_tool_call_id": call_id,
+    }
 
 
 def plan_confirm_node(state: ResumeState) -> dict[str, Any]:
@@ -278,44 +259,45 @@ def plan_confirm_node(state: ResumeState) -> dict[str, Any]:
     # server 已归一化为 {action: approve|suggest, suggestion?, selection?}
     inbound = DecisionInbound.model_validate(value if isinstance(value, dict) else {})
     if inbound.action == "suggest":
-        msg = _build_suggestion_message(
-            "用户对计划的建议", inbound.suggestion, inbound.selection
-        )
+        feedback = inbound.suggestion
+        if inbound.selection:
+            feedback = f"{feedback}（选区: {inbound.selection}）"
         return {
-            "plan": [],  # 触发回 plan_node 重新规划
-            "messages": [msg],
+            "plan": [],
+            "plan_status": "draft",
+            "plan_feedback": feedback,
         }
-    return {}  # approve
+    return {"plan_status": "approved"}
 
 
 def route_after_plan_confirm(state: ResumeState) -> str:
-    """计划确认后：plan 被清空（suggest）回 plan 重规划，否则回 chat_node。"""
-    if not state.get("plan"):
+    """计划建议回 plan 重规划；批准后生成最终工具结果。"""
+    if state.get("plan_status") != "approved":
         dlog("resume", "route_after_plan_confirm", "→ plan_node (重规划)")
         return "plan_node"
-    dlog("resume", "route_after_plan_confirm", "→ chat_node")
-    return "chat_node"
+    dlog("resume", "route_after_plan_confirm", "→ plan_result")
+    return "plan_result"
+
+
+def plan_result_node(state: ResumeState) -> dict[str, Any]:
+    """计划批准后响应原始 request_plan tool_call，再交回 chat_node 执行。"""
+    call_id = state.get("plan_request_tool_call_id")
+    if not call_id:
+        raise RuntimeError("approved plan missing request_plan tool_call_id")
+    content = json.dumps(
+        {
+            "status": "approved",
+            "plan": state.get("plan", []),
+            "instruction": "计划已由用户批准，不要再次询问；立即按计划执行修改。",
+        },
+        ensure_ascii=False,
+    )
+    return {"messages": [ToolMessage(content=content, tool_call_id=call_id)]}
 
 
 # --------------------------------------------------------------------------- #
 # edit 分支：逐条 approve 小循环（edit_executor ⟷ approve_node）
 # --------------------------------------------------------------------------- #
-
-
-def _build_suggestion_message(
-    prefix: str, suggestion: str, selection: str
-) -> HumanMessage:
-    """构造 suggest 分支的注入 HumanMessage。
-
-    前端 suggest 可带 selection（用户在 shot 里选中的原文片段）。若有 selection，
-    注入「{prefix}（选区: ...）: {suggestion}」，让 chat_node/plan_node 据选区+建议处理；
-    无 selection 则「{prefix}: {suggestion}」。
-    """
-    if selection:
-        content = f"{prefix}（选区: {selection}）: {suggestion}"
-    else:
-        content = f"{prefix}: {suggestion}"
-    return HumanMessage(content=content)
 
 
 def _collect_pending_edits(state: ResumeState) -> list[dict[str, str]]:
@@ -569,8 +551,16 @@ def hitl_standby_node(state: ResumeState) -> dict[str, Any]:
     request = inbound.request
     selection = inbound.selection
     if selection:
-        return {"messages": [HumanMessage(content=f"{request}（选区: {selection}）")]}
-    return {"messages": [HumanMessage(content=request)]}
+        message = HumanMessage(content=f"{request}（选区: {selection}）")
+    else:
+        message = HumanMessage(content=request)
+    return {
+        "messages": [message],
+        "plan": [],
+        "plan_status": "none",
+        "plan_feedback": "",
+        "plan_request_tool_call_id": None,
+    }
 
 
 def route_after_hitl(state: ResumeState) -> str:
@@ -603,6 +593,7 @@ def build_resume_workflow() -> Any:
     workflow.add_node("chat_node", chat_node)
     workflow.add_node("plan_node", plan_node)
     workflow.add_node("plan_confirm", plan_confirm_node)
+    workflow.add_node("plan_result", plan_result_node)
     workflow.add_node("edit_executor", edit_executor_node)
     workflow.add_node("approve_node", approve_node)
     workflow.add_node("hitl_standby", hitl_standby_node)
@@ -623,8 +614,9 @@ def build_resume_workflow() -> Any:
     workflow.add_conditional_edges(
         "plan_confirm",
         route_after_plan_confirm,
-        {"plan_node": "plan_node", "chat_node": "chat_node"},
+        {"plan_node": "plan_node", "plan_result": "plan_result"},
     )
+    workflow.add_edge("plan_result", "chat_node")
     # edit_executor ⟷ approve_node 逐条 approve 小循环
     workflow.add_conditional_edges(
         "edit_executor",

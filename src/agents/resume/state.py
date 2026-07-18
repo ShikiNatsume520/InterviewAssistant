@@ -11,7 +11,7 @@ approve/reject/suggest，approve 即替换 shot 并取下一条，直到全部�
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -29,6 +29,10 @@ class ResumeState(TypedDict, total=False):
 
     运行期：
         plan: plan_node 产出的修改计划（步骤列表），作 chat_node 决策参考。
+        plan_status: 计划控制工具所处阶段。
+        plan_feedback: 用户对计划的修改建议，不写入 messages。
+        plan_request_tool_call_id: 原始 request_plan tool_call ID；批准后用它返回
+            最终 ToolMessage，形成完整工具调用协议。
         last_summary: chat_node 无 tool_call 时的总结文本，hitl_standby 展示并
             退出时回传主图。
         save: 退出意图。hitl_standby 收到前端结束信号时设置——``True`` 保存退出，
@@ -52,6 +56,9 @@ class ResumeState(TypedDict, total=False):
     resume_session_id: str
     resume_shot: str
     plan: list[str]
+    plan_status: Literal["none", "draft", "approved"]
+    plan_feedback: str
+    plan_request_tool_call_id: str | None
     last_summary: str
     save: bool
     outcome: str

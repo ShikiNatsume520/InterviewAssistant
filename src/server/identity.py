@@ -16,7 +16,7 @@ from typing import Literal
 PrincipalKind = Literal["guest", "developer"]
 ThreadStatus = Literal["idle", "running", "waiting", "interrupted"]
 ActiveMode = Literal["chat", "resume"]
-ActiveAgent = Literal["main", "resume"]
+ActiveAgent = Literal["main", "resume", "research"]
 
 GUEST_SESSION_TTL = timedelta(days=30)
 DEVELOPER_SESSION_TTL = timedelta(hours=12)
@@ -178,10 +178,13 @@ class IdentityThreadStore:
 
     def _migrate_threads_for_waiting_status(self) -> None:
         """扩展旧数据库的 Thread 状态约束，同时保留活动任务。"""
-        has_product_events = self._conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'product_events'"
-        ).fetchone() is not None
+        has_product_events = (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'product_events'"
+            ).fetchone()
+            is not None
+        )
         event_setup = """
         event_copy = """
         if has_product_events:
