@@ -25,3 +25,6 @@ INDEX_MD_PATH: Path = PROJECT_ROOT / "data" / "index.md"
 
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
 """调试日志目录（``debug_YYYYMMDD_HHMMSS.log`` 落盘于此）。"""
+
+PERSONAL_KNOWLEDGE_DIR: Path = PROJECT_ROOT / "data" / "knowledge" / "principals"
+"""按 principal 物理隔离的个人知识库根目录。"""

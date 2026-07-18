@@ -43,6 +43,9 @@ class ResearchState(TypedDict, total=False):
     """Research 子图输入、运行状态和结构化输出。"""
 
     gap_topic: str
+    principal_id: str
+    thread_id: str
+    tool_call_id: str
     outline: list[str]
     outline_feedback: str
     connect_attempts: int
@@ -57,5 +60,6 @@ class ResearchState(TypedDict, total=False):
     report_summary: str
     proposed_file_name: str
     knowledge_decision: Literal["pending", "approved", "rejected", "not_asked"]
-    import_status: Literal["pending", "not_requested"]
+    import_status: Literal["pending", "completed", "failed", "not_requested"]
+    knowledge_resource_id: str
     approval_status: Literal["approved", "rejected", "aborted"]

@@ -10,6 +10,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from agents.index.service import import_personal_markdown
 from agents.research.prompts import (
     build_distill_prompt,
     build_finalize_prompt,
@@ -379,6 +380,32 @@ def knowledge_confirm_node(state: ResearchState) -> dict[str, Any]:
     }
 
 
+async def import_knowledge_node(state: ResearchState) -> dict[str, Any]:
+    """通过正式导入服务把已授权报告写入当前 principal 的个人知识库。"""
+    principal_id = state.get("principal_id", "")
+    if not principal_id:
+        return {"import_status": "failed", "phase": "completed"}
+    resource = await import_personal_markdown(
+        principal_id,
+        state.get("proposed_file_name", "深研报告.md"),
+        state.get("report_markdown", ""),
+        "research",
+        idempotency_key=(
+            f"research:{state.get('thread_id', '')}:{state.get('tool_call_id', '')}"
+        ),
+    )
+    return {
+        "import_status": "completed" if resource.status == "ready" else "failed",
+        "knowledge_resource_id": resource.id,
+        "phase": "completed",
+    }
+
+
+def route_after_knowledge_confirm(state: ResearchState) -> str:
+    """仅在用户批准时进入正式知识导入节点。"""
+    return "import_knowledge" if state.get("knowledge_decision") == "approved" else "end"
+
+
 def abort_node(state: ResearchState) -> dict[str, Any]:
     """统一补齐取消或网络终止状态。"""
     approval = state.get("approval_status") or "aborted"
@@ -406,6 +433,7 @@ def build_research_workflow() -> Any:
     workflow.add_node("prepare_report", prepare_report_node)
     workflow.add_node("compose_report", compose_report_node)
     workflow.add_node("knowledge_confirm", knowledge_confirm_node)
+    workflow.add_node("import_knowledge", import_knowledge_node)
     workflow.add_node("abort", abort_node)
     workflow.add_edge(START, "outline")
     workflow.add_edge("outline", "outline_confirm")
@@ -463,7 +491,12 @@ def build_research_workflow() -> Any:
     )
     workflow.add_edge("prepare_report", "compose_report")
     workflow.add_edge("compose_report", "knowledge_confirm")
-    workflow.add_edge("knowledge_confirm", END)
+    workflow.add_conditional_edges(
+        "knowledge_confirm",
+        route_after_knowledge_confirm,
+        {"import_knowledge": "import_knowledge", "end": END},
+    )
+    workflow.add_edge("import_knowledge", END)
     workflow.add_edge("abort", END)
     return workflow
 

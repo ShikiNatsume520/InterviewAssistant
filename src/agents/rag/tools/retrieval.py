@@ -14,11 +14,11 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agents.index.scope import KnowledgeScope, resolve_knowledge_scope
 from agents.rag.state import Citation, RawResult
-from kernel.embedder import COLLECTION_NAME
+from kernel.knowledge import KnowledgeRepository
 from kernel.logging import dlog
-from kernel.paths import CHROMA_PATH, MARKDOWN_DIR
-from kernel.paths import INDEX_MD_PATH as INDEX_MD
+from kernel.persistence import APP_DB_PATH
 
 if TYPE_CHECKING:
     from chromadb.api.types import QueryResult
@@ -106,7 +106,14 @@ def _parse_index(text: str) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # grep 工具
 # --------------------------------------------------------------------------- #
-def _grep_file(path: Path, terms: list[str]) -> list[RawResult]:
+def _grep_file(
+    path: Path,
+    terms: list[str],
+    *,
+    scope: str = "public",
+    resource_id: str | None = None,
+    display_name: str | None = None,
+) -> list[RawResult]:
     """在单文件内逐行匹配任一检索词，返回合并行区间后的结果。
 
     score 为词覆盖率：区间内命中的独立词数 / 检索词总数，与向量 score
@@ -152,6 +159,9 @@ def _grep_file(path: Path, terms: list[str]) -> list[RawResult]:
                 content="\n".join(lines[s - 1 : e]),
                 score=len(term_union) / n_terms,
                 source="grep",
+                resource_id=resource_id or path.stem,
+                scope=scope,
+                display_name=display_name or path.name,
             )
         )
     dlog(
@@ -168,7 +178,88 @@ def _grep_file(path: Path, terms: list[str]) -> list[RawResult]:
 # --------------------------------------------------------------------------- #
 # keyword 管道
 # --------------------------------------------------------------------------- #
-def keyword_retrieve(search_query: str) -> list[RawResult]:
+def _resource_names(principal_id: str) -> dict[str, tuple[str, str]]:
+    if not principal_id:
+        return {}
+    repository = KnowledgeRepository(APP_DB_PATH)
+    try:
+        return {
+            item.storage_name: (item.id, item.display_name)
+            for item in repository.list(principal_id)
+            if item.status == "ready"
+        }
+    finally:
+        repository.close()
+
+
+def _public_names() -> dict[str, tuple[str, str]]:
+    scope = resolve_knowledge_scope("public")
+    names: dict[str, tuple[str, str]] = {}
+    metadata_dir = scope.documents_dir / ".metadata"
+    if not metadata_dir.exists():
+        return names
+    for metadata in metadata_dir.glob("*.name"):
+        storage_name = f"{metadata.stem}.md"
+        if (scope.documents_dir / storage_name).exists():
+            names[storage_name] = (
+                metadata.stem,
+                metadata.read_text(encoding="utf-8").strip() or storage_name,
+            )
+    return names
+
+
+def _public_ready_files(scope: KnowledgeScope) -> set[str]:
+    metadata_dir = scope.documents_dir / ".metadata"
+    pending = (
+        {f"{path.stem}.md" for path in metadata_dir.glob("*.pending")}
+        if metadata_dir.exists()
+        else set()
+    )
+    return {path.name for path in scope.documents_dir.glob("*.md")} - pending
+
+
+def _keyword_scope(
+    search_query: str,
+    terms: list[str],
+    target: KnowledgeScope,
+    names: dict[str, tuple[str, str]],
+) -> list[RawResult]:
+    if not target.index_path.exists():
+        return []
+    rows = _parse_index(target.index_path.read_text(encoding="utf-8"))
+    candidate_files: list[str] = []
+    for row in rows:
+        if any(t in kw or kw in t for t in terms for kw in row["keywords"]):
+            candidate_files.extend(row["files"])
+    candidate_files = list(dict.fromkeys(candidate_files))
+    targets = (
+        [
+            target.documents_dir / f
+            for f in candidate_files
+            if (target.documents_dir / f).exists()
+        ]
+        if candidate_files
+        else sorted(target.documents_dir.glob("*.md"))
+    )
+    if target.kind == "public":
+        ready_files = _public_ready_files(target)
+        targets = [path for path in targets if path.name in ready_files]
+    results: list[RawResult] = []
+    for path in targets:
+        identity = names.get(path.name)
+        results.extend(
+            _grep_file(
+                path,
+                terms,
+                scope=target.kind,
+                resource_id=identity[0] if identity else path.stem,
+                display_name=identity[1] if identity else path.name,
+            )
+        )
+    return results
+
+
+def keyword_retrieve(search_query: str, principal_id: str = "") -> list[RawResult]:
     """Keyword 管道：index.md 关键词匹配 → 候选文件定向 grep 或无候选全目录 grep。
 
     Args:
@@ -178,39 +269,19 @@ def keyword_retrieve(search_query: str) -> list[RawResult]:
         原始检索结果列表（可能为空，由 aggregate 判 gap）。
     """
     terms = _extract_terms(search_query)
-    rows = _parse_index(INDEX_MD.read_text(encoding="utf-8"))
     dlog("rag.retrieval", "keyword_retrieve", "进入", query=search_query, terms=terms)
-
-    candidate_files: list[str] = []
-    for row in rows:
-        if any(t in kw or kw in t for t in terms for kw in row["keywords"]):
-            candidate_files.extend(row["files"])
-    candidate_files = list(dict.fromkeys(candidate_files))
-
-    targets: list[Path] = []
-    if candidate_files:
-        targets = [
-            MARKDOWN_DIR / f for f in candidate_files if (MARKDOWN_DIR / f).exists()
-        ]
-        dlog(
-            "rag.retrieval",
-            "keyword_retrieve",
-            "定向 grep（index.md 候选）",
-            candidates_n=len(candidate_files),
-            targets_n=len(targets),
+    results = _keyword_scope(
+        search_query, terms, resolve_knowledge_scope("public"), _public_names()
+    )
+    if principal_id:
+        results.extend(
+            _keyword_scope(
+                search_query,
+                terms,
+                resolve_knowledge_scope("personal", principal_id),
+                _resource_names(principal_id),
+            )
         )
-    else:
-        targets = sorted(MARKDOWN_DIR.glob("*.md"))
-        dlog(
-            "rag.retrieval",
-            "keyword_retrieve",
-            "无候选 → 全目录 grep",
-            targets_n=len(targets),
-        )
-
-    results: list[RawResult] = []
-    for fp in targets:
-        results.extend(_grep_file(fp, terms))
     dlog("rag.retrieval", "keyword_retrieve", "完成", results_n=len(results))
     return results
 
@@ -229,23 +300,28 @@ def _expand_heading_sections(recalled: list[RawResult]) -> list[RawResult]:
     """
     groups: dict[tuple[str, str], list[RawResult]] = {}
     for c in recalled:
-        groups.setdefault((c["file_path"], c["heading"]), []).append(c)
+        groups.setdefault((c.get("resource_id", c["file_path"]), c["heading"]), []).append(c)
 
     out: list[RawResult] = []
-    for (fp, heading), chunks in groups.items():
+    for (_, heading), chunks in groups.items():
         ranges = _merge_ranges([(c["start_line"], c["end_line"]) for c in chunks])
         best_score = max(c["score"] for c in chunks)
         content = "\n".join(c["content"] for c in chunks)
         for s, e in ranges:
             out.append(
                 RawResult(
-                    file_path=fp,
+                    file_path=chunks[0]["file_path"],
                     start_line=s,
                     end_line=e,
                     heading=heading,
                     content=content,
                     score=best_score,
                     source="vector",
+                    resource_id=chunks[0].get("resource_id", chunks[0]["file_path"]),
+                    scope=chunks[0].get("scope", "public"),
+                    display_name=chunks[0].get(
+                        "display_name", chunks[0]["file_path"]
+                    ),
                 )
             )
     return out
@@ -271,32 +347,37 @@ def _compute_confidence(
     return top_score, avg_score, ratio
 
 
-_chroma_col: Any = None
+_chroma_cols: dict[str, Any] = {}
 """Chroma collection 单例（懒加载，避免每次 retrieve new PersistentClient 触发
 Rust backend 初始化竞态——首次 new 时 RustBindingsAPI.bindings 偶发未创建，
 stop() ``del self.bindings`` 抛 AttributeError）。"""
 
 
-def _get_chroma_collection() -> Any:
+def _get_chroma_collection(scope: KnowledgeScope) -> Any:
     """获取（惰性创建并缓存的）Chroma collection 单例。
 
     单例化后只在首次检索 new 一次 PersistentClient；首次若失败（单例仍 None），
     下次重试时 Rust 扩展已进程级加载，初始化稳定成功并缓存复用——故"刷新后好了"。
     """
-    global _chroma_col
-    if _chroma_col is None:
+    if scope.collection_name not in _chroma_cols:
         import chromadb
 
         from kernel.embedder import get_embed_fn
 
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        _chroma_col = client.get_or_create_collection(
-            COLLECTION_NAME, embedding_function=get_embed_fn()
+        client = chromadb.PersistentClient(path=str(scope.chroma_path))
+        _chroma_cols[scope.collection_name] = client.get_or_create_collection(
+            scope.collection_name,
+            embedding_function=get_embed_fn(),
+            metadata={"hnsw:space": "cosine"},
         )
-    return _chroma_col
+    return _chroma_cols[scope.collection_name]
 
 
-def semantic_retrieve(search_query: str) -> list[RawResult]:
+def _semantic_scope(
+    search_query: str,
+    scope: KnowledgeScope,
+    names: dict[str, tuple[str, str]],
+) -> list[RawResult]:
     """Semantic 管道：向量检索 → 标题节扩展 → score 阈值过滤。
 
     按 ``SCORE_LOW_THRESHOLD`` 过滤召回结果；过滤后为空则由
@@ -308,8 +389,24 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
     Returns:
         过滤后的检索结果（score ≥ 阈值），或空列表（gap 场景）。
     """
-    col = _get_chroma_collection()
-    res: QueryResult = col.query(query_texts=[search_query], n_results=VECTOR_N_RESULTS)
+    col = _get_chroma_collection(scope)
+    if col.count() == 0:
+        return []
+    query_args: dict[str, Any] = {
+        "query_texts": [search_query],
+        "n_results": VECTOR_N_RESULTS,
+    }
+    if scope.kind == "personal":
+        ready_resource_ids = [resource_id for resource_id, _ in names.values()]
+        if not ready_resource_ids:
+            return []
+        query_args["where"] = {"resource_id": {"$in": ready_resource_ids}}
+    else:
+        ready_files = sorted(_public_ready_files(scope))
+        if not ready_files:
+            return []
+        query_args["where"] = {"file_path": {"$in": ready_files}}
+    res: QueryResult = col.query(**query_args)
     ids = res["ids"]
     metas = res["metadatas"]
     dists = res["distances"]
@@ -329,15 +426,22 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
     for i in range(len(ids[0])):
         meta = metas[0][i]
         dist = dists[0][i]
+        identity = names.get(str(meta["file_path"]))
         recalled.append(
             RawResult(
-                file_path=str(meta["file_path"]),
+                file_path=identity[1] if identity else str(meta["file_path"]),
                 start_line=int(meta["start_line"]),  # type: ignore[arg-type]
                 end_line=int(meta["end_line"]),  # type: ignore[arg-type]
                 heading=str(meta["heading"]),
                 content=docs[0][i],
                 score=1.0 / (1.0 + dist),
                 source="vector",
+                resource_id=str(
+                    meta.get("resource_id")
+                    or (identity[0] if identity else Path(str(meta["file_path"])).stem)
+                ),
+                scope=scope.kind,
+                display_name=identity[1] if identity else str(meta["file_path"]),
             )
         )
 
@@ -369,10 +473,29 @@ def semantic_retrieve(search_query: str) -> list[RawResult]:
     return filtered
 
 
+def semantic_retrieve(search_query: str, principal_id: str = "") -> list[RawResult]:
+    """分别检索公共与当前 principal 的个人 collection 后合并排序。"""
+    results = _semantic_scope(
+        search_query, resolve_knowledge_scope("public"), _public_names()
+    )
+    if principal_id:
+        names = _resource_names(principal_id)
+        results.extend(
+            _semantic_scope(
+                search_query,
+                resolve_knowledge_scope("personal", principal_id),
+                names,
+            )
+        )
+    return sorted(results, key=lambda item: item["score"], reverse=True)
+
+
 # --------------------------------------------------------------------------- #
 # 外部接口
 # --------------------------------------------------------------------------- #
-def retrieve_pipeline(search_query: str, search_type: str) -> list[RawResult]:
+def retrieve_pipeline(
+    search_query: str, search_type: str, principal_id: str = ""
+) -> list[RawResult]:
     """按 search_type 分派并执行对应管道。
 
     两种 ``search_type`` 对 ``search_query`` 的要求不同：
@@ -407,8 +530,8 @@ def retrieve_pipeline(search_query: str, search_type: str) -> list[RawResult]:
         query=search_query,
     )
     if search_type == "keyword":
-        return keyword_retrieve(search_query)
-    return semantic_retrieve(search_query)
+        return keyword_retrieve(search_query, principal_id)
+    return semantic_retrieve(search_query, principal_id)
 
 
 def aggregate_results(
@@ -439,6 +562,9 @@ def aggregate_results(
             end_line=r["end_line"],
             content=r["content"],
             score=r["score"],
+            resource_id=r.get("resource_id", r["file_path"]),
+            scope=r.get("scope", "public"),
+            display_name=r.get("display_name", r["file_path"]),
         )
         for r in ranked
     ]

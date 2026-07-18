@@ -80,6 +80,8 @@ class IndexAgentState(TypedDict, total=False):
     """
 
     target_files: list[str]
+    scope: str
+    principal_id: str
     existing_rows: list[IndexRow]
     chunks: list[Chunk]
     index_update: IndexUpdate
@@ -96,6 +98,7 @@ def chunk_to_metadata(chunk: Chunk) -> dict[str, Any]:
     """
     return {
         "file_path": chunk["file_path"],
+        "resource_id": chunk["file_path"].removesuffix(".md"),
         "start_line": chunk["start_line"],
         "end_line": chunk["end_line"],
         "heading": chunk["heading"],

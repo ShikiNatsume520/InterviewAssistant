@@ -10,8 +10,51 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agents.index.scope import KnowledgeScope
 from agents.rag.state import RawResult
+from agents.rag.tools import retrieval
 from agents.rag.tools.retrieval import _grep_file, aggregate_results
+
+
+class _FakePersonalCollection:
+    def __init__(self) -> None:
+        self.query_args: dict[str, object] = {}
+
+    def count(self) -> int:
+        return 1
+
+    def query(self, **kwargs: object) -> dict[str, object]:
+        self.query_args = kwargs
+        return {
+            "ids": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+            "documents": [[]],
+        }
+
+
+def test_personal_semantic_query_filters_only_ready_resource_ids(
+    tmp_path: Path,
+) -> None:
+    collection = _FakePersonalCollection()
+    scope = KnowledgeScope(
+        "personal",
+        "guest-a",
+        tmp_path,
+        tmp_path / "index.md",
+        tmp_path / "chroma",
+        "personal_test",
+    )
+    retrieval._chroma_cols[scope.collection_name] = collection
+    try:
+        assert retrieval._semantic_scope(
+            "query", scope, {"ready.md": ("ready-resource", "Ready")}
+        ) == []
+        assert collection.query_args["where"] == {
+            "resource_id": {"$in": ["ready-resource"]}
+        }
+    finally:
+        retrieval._chroma_cols.pop(scope.collection_name, None)
 
 
 def _write_tmp_md(tmp_path: Path, name: str, text: str) -> Path:
@@ -105,6 +148,9 @@ def test_aggregate_preserves_score_and_sorts_desc() -> None:
             "end_line",
             "content",
             "score",
+            "resource_id",
+            "scope",
+            "display_name",
         }
 
 

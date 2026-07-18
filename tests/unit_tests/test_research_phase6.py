@@ -218,3 +218,41 @@ async def test_wrapper_keeps_full_report_out_of_main_messages(monkeypatch: Any) 
     assert messages[0].name == "research_agent"
     assert "精简摘要" in messages[0].content
     assert "绝不能进入 MainState.messages 的完整报告" not in messages[0].content
+
+
+@pytest.mark.anyio
+async def test_approved_report_uses_formal_import_service(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_import(*args: Any, **kwargs: Any) -> Any:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(id="knowledge-1", status="ready")
+
+    monkeypatch.setattr(research_graph, "import_personal_markdown", fake_import)
+    update = await research_graph.import_knowledge_node(
+        {
+            "principal_id": "guest-a",
+            "thread_id": "thread-a",
+            "tool_call_id": "tool-a",
+            "proposed_file_name": "研究报告.md",
+            "report_markdown": "# 完整报告",
+        }
+    )
+
+    assert captured["args"][:4] == (
+        "guest-a",
+        "研究报告.md",
+        "# 完整报告",
+        "research",
+    )
+    assert captured["kwargs"]["idempotency_key"] == "research:thread-a:tool-a"
+    assert update == {
+        "import_status": "completed",
+        "knowledge_resource_id": "knowledge-1",
+        "phase": "completed",
+    }
+
+    projected = _research_product_updates({"import_knowledge": update})
+    assert projected[-1][1]["importStatus"] == "completed"
+    assert projected[-1][1]["resourceId"] == "knowledge-1"

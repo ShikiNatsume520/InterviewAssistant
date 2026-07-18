@@ -93,7 +93,16 @@ async def research_agent_node(
 
     # ── 调用子图（interrupt 时透传 GraphInterrupt） ──
     try:
-        result = await research_graph.ainvoke({"gap_topic": gap_topic}, config)
+        configurable = config.get("configurable", {})
+        result = await research_graph.ainvoke(
+            {
+                "gap_topic": gap_topic,
+                "principal_id": str(configurable.get("user_id", "")),
+                "thread_id": str(configurable.get("thread_id", "")),
+                "tool_call_id": tool_call_id,
+            },
+            config,
+        )
     except GraphInterrupt:
         dlog(
             "research",
@@ -125,7 +134,6 @@ async def research_agent_node(
         requirements = [
             "完整报告已经由 Research Agent 在聊天区展示，不要重复生成报告全文。",
             "可以简短确认研究已经完成。",
-            "不得声称资料已经成功进入知识库。",
         ]
     elif approval == "rejected":
         outcome = "cancelled"
@@ -136,6 +144,13 @@ async def research_agent_node(
 
     knowledge_decision = str(result.get("knowledge_decision", "not_asked"))
     import_status = str(result.get("import_status", "not_requested"))
+    knowledge_resource_id = str(result.get("knowledge_resource_id", ""))
+    if import_status == "completed":
+        requirements.append("可以明确说明用户已批准，报告已进入个人知识库。")
+    elif knowledge_decision == "approved":
+        requirements.append("个人知识库导入失败，不得声称已经入库；可提示用户稍后重试。")
+    else:
+        requirements.append("不得声称资料已经进入知识库。")
     tool_result = {
         "type": "research_result",
         "outcome": outcome,
@@ -145,6 +160,7 @@ async def research_agent_node(
         "knowledge_base": {
             "decision": knowledge_decision,
             "import_status": import_status,
+            "resource_id": knowledge_resource_id,
         },
         "response_requirements": requirements,
     }

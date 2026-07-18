@@ -22,11 +22,15 @@ def merge_current_turn_citations(
     if not update:
         return []
     merged: dict[tuple[str, int, int], Citation] = {
-        (item["file_path"], item["start_line"], item["end_line"]): item
+        (item.get("resource_id", item["file_path"]), item["start_line"], item["end_line"]): item
         for item in current
     }
     for item in update:
-        key = (item["file_path"], item["start_line"], item["end_line"])
+        key = (
+            item.get("resource_id", item["file_path"]),
+            item["start_line"],
+            item["end_line"],
+        )
         previous = merged.get(key)
         if previous is None or item["score"] > previous["score"]:
             merged[key] = item

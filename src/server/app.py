@@ -29,6 +29,7 @@ GET /v1/state 拿到，POST /v1/checkpoint 从 checkpoint 续跑。LLM 节点同
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import secrets
 from contextlib import asynccontextmanager
@@ -60,6 +61,15 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field, ValidationError
 from sse_starlette.sse import EventSourceResponse
 
+from agents.index.scope import resolve_knowledge_scope
+from agents.index.service import (
+    delete_personal_resource,
+    delete_public_resource,
+    import_personal_markdown,
+    import_public_markdown,
+    reindex_personal_resource,
+    reindex_public_resource,
+)
 from agents.main.graph import build_main_graph
 from agents.rag.state import Citation
 from kernel.config import COOKIE_SECURE, DEV_ACCESS_TOKEN, DEV_MODE_ENABLED
@@ -72,6 +82,11 @@ from kernel.contracts import (
     ResumeApprovePayload,
     ResumeHitlPayload,
     normalize_resume_value,
+)
+from kernel.knowledge import (
+    KnowledgeAccessDenied,
+    KnowledgeRepository,
+    KnowledgeResource,
 )
 from kernel.logging import dlog
 from kernel.paths import PROJECT_ROOT
@@ -138,14 +153,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with AsyncSqliteSaver.from_conn_string(str(CHECKPOINT_DB_PATH)) as saver:
         graph = build_main_graph(checkpointer=saver, store=store)
         resumes = ResumeRepository(APP_DB_PATH)
+        knowledge = KnowledgeRepository(APP_DB_PATH)
         _state["saver"] = saver
         _state["graph"] = graph
         _state["identity"] = identity
         _state["events"] = events
         _state["resumes"] = resumes
+        _state["knowledge"] = knowledge
         try:
             yield
         finally:
+            knowledge.close()
             resumes.close()
             events.close()
             identity.close()
@@ -269,6 +287,14 @@ class RenameResumeRequest(BaseModel):
     display_name: str
 
 
+class UploadKnowledgeRequest(BaseModel):
+    """浏览器上传的一份 Markdown 知识。"""
+    original_name: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1)
+    display_name: str | None = Field(default=None, max_length=200)
+    scope: Literal["personal", "public"] = "personal"
+
+
 def _identity_store() -> IdentityThreadStore:
     return cast(IdentityThreadStore, _state["identity"])
 
@@ -279,6 +305,10 @@ def _event_store() -> ProductEventStore:
 
 def _resume_repository() -> ResumeRepository:
     return cast(ResumeRepository, _state["resumes"])
+
+
+def _knowledge_repository() -> KnowledgeRepository:
+    return cast(KnowledgeRepository, _state["knowledge"])
 
 
 def _set_session_cookie(response: Response, auth: AuthSession) -> None:
@@ -716,6 +746,207 @@ async def download_resume(
     return response
 
 
+def _knowledge_json(resource: KnowledgeResource) -> dict[str, Any]:
+    return {
+        "id": resource.id,
+        "scope": "personal",
+        "sourceType": resource.source_type,
+        "displayName": resource.display_name,
+        "status": resource.status,
+        "failureReason": resource.failure_reason,
+        "createdAt": resource.created_at,
+        "updatedAt": resource.updated_at,
+        "readOnly": False,
+    }
+
+
+def _public_knowledge() -> list[dict[str, Any]]:
+    scope = resolve_knowledge_scope("public")
+    items: list[dict[str, Any]] = []
+    for path in sorted(scope.documents_dir.glob("*.md")):
+        resource_id = "public:" + hashlib.sha256(path.name.encode()).hexdigest()[:24]
+        metadata = scope.documents_dir / ".metadata" / f"{path.stem}.name"
+        display_name = (
+            metadata.read_text(encoding="utf-8").strip()
+            if metadata.exists()
+            else path.stem
+        )
+        timestamp = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+        items.append(
+            {
+                "id": resource_id,
+                "scope": "public",
+                "sourceType": "upload" if metadata.exists() else "builtin",
+                "displayName": display_name,
+                "status": "ready",
+                "failureReason": "",
+                "createdAt": timestamp,
+                "updatedAt": timestamp,
+                "readOnly": True,
+            }
+        )
+    return items
+
+
+def _public_path(resource_id: str) -> Any:
+    scope = resolve_knowledge_scope("public")
+    for path in scope.documents_dir.glob("*.md"):
+        candidate = "public:" + hashlib.sha256(path.name.encode()).hexdigest()[:24]
+        if candidate == resource_id:
+            return path
+    return None
+
+
+def _require_developer(auth: AuthSession) -> None:
+    if auth.principal.kind != "developer":
+        raise HTTPException(status_code=403, detail="只有开发人员可以管理公共知识")
+
+
+@app.get("/v1/knowledge/resources")
+async def list_knowledge_resources(
+    auth: AuthSession = Depends(current_auth),
+) -> JSONResponse:
+    """列出公共只读知识和当前 principal 的个人知识。"""
+    personal = [
+        _knowledge_json(item)
+        for item in _knowledge_repository().list(auth.principal.id)
+    ]
+    public = [
+        {**item, "readOnly": auth.principal.kind != "developer"}
+        for item in _public_knowledge()
+    ]
+    return _json_with_session(public + personal, auth)
+
+
+@app.post("/v1/knowledge/resources")
+async def upload_knowledge_resource(
+    req: UploadKnowledgeRequest,
+    request: Request,
+    auth: AuthSession = Depends(current_auth),
+) -> JSONResponse:
+    """上传 Markdown 并同步等待个人索引完成。"""
+    if not req.original_name.lower().endswith(".md"):
+        raise HTTPException(status_code=422, detail="只支持 Markdown 文件")
+    if req.scope == "public":
+        _require_developer(auth)
+    runtime_model = _runtime_model_from_request(request, auth.principal)
+    try:
+        with use_runtime_model(runtime_model):
+            if req.scope == "public":
+                public_id = await import_public_markdown(
+                    req.display_name or req.original_name, req.content
+                )
+                path = resolve_knowledge_scope("public").documents_dir / f"{public_id}.md"
+                resource_id = "public:" + hashlib.sha256(path.name.encode()).hexdigest()[:24]
+                payload = next(
+                    item for item in _public_knowledge() if item["id"] == resource_id
+                )
+                payload = {**payload, "readOnly": False}
+            else:
+                resource = await import_personal_markdown(
+                    auth.principal.id,
+                    req.display_name or req.original_name,
+                    req.content,
+                    "upload",
+                    repository=_knowledge_repository(),
+                )
+                payload = _knowledge_json(resource)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _json_with_session(
+        payload, auth, status.HTTP_201_CREATED
+    )
+
+
+@app.get("/v1/knowledge/resources/{resource_id}")
+async def read_knowledge_resource(
+    resource_id: str, auth: AuthSession = Depends(current_auth)
+) -> JSONResponse:
+    """读取公共或当前 principal 的 Markdown 原文。"""
+    if resource_id.startswith("public:"):
+        path = _public_path(resource_id)
+        if path is None or not path.exists():
+            raise HTTPException(status_code=404, detail="知识资源不存在")
+        item = next(item for item in _public_knowledge() if item["id"] == resource_id)
+        return _json_with_session(
+            {
+                **item,
+                "readOnly": auth.principal.kind != "developer",
+                "content": path.read_text(encoding="utf-8"),
+            },
+            auth,
+        )
+    try:
+        resource = _knowledge_repository().require(auth.principal.id, resource_id)
+    except KnowledgeAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="知识资源不存在") from exc
+    scope = resolve_knowledge_scope("personal", auth.principal.id)
+    path = scope.documents_dir / resource.storage_name
+    if not path.exists():
+        raise HTTPException(status_code=409, detail="知识原文缺失，可尝试重新索引")
+    return _json_with_session(
+        {**_knowledge_json(resource), "content": path.read_text(encoding="utf-8")},
+        auth,
+    )
+
+
+@app.post("/v1/knowledge/resources/{resource_id}/reindex")
+async def reindex_knowledge_resource(
+    resource_id: str,
+    request: Request,
+    auth: AuthSession = Depends(current_auth),
+) -> JSONResponse:
+    """重新索引当前 principal 的个人知识。"""
+    if resource_id.startswith("public:"):
+        _require_developer(auth)
+    runtime_model = _runtime_model_from_request(request, auth.principal)
+    if resource_id.startswith("public:"):
+        path = _public_path(resource_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="知识资源不存在")
+        with use_runtime_model(runtime_model):
+            await reindex_public_resource(path.name)
+        payload = next(item for item in _public_knowledge() if item["id"] == resource_id)
+        return _json_with_session({**payload, "readOnly": False}, auth)
+    try:
+        with use_runtime_model(runtime_model):
+            resource = await reindex_personal_resource(
+                auth.principal.id,
+                resource_id,
+                repository=_knowledge_repository(),
+            )
+    except KnowledgeAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="知识资源不存在") from exc
+    return _json_with_session(_knowledge_json(resource), auth)
+
+
+@app.delete("/v1/knowledge/resources/{resource_id}")
+async def delete_knowledge_resource(
+    resource_id: str, auth: AuthSession = Depends(current_auth)
+) -> Response:
+    """删除个人知识的向量、关键词索引、原文和业务记录。"""
+    if resource_id.startswith("public:"):
+        _require_developer(auth)
+        path = _public_path(resource_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="知识资源不存在")
+        await delete_public_resource(path.name)
+        response = Response(status_code=status.HTTP_204_NO_CONTENT)
+        _set_session_cookie(response, auth)
+        return response
+    try:
+        await delete_personal_resource(
+            auth.principal.id,
+            resource_id,
+            repository=_knowledge_repository(),
+        )
+    except KnowledgeAccessDenied as exc:
+        raise HTTPException(status_code=404, detail="知识资源不存在") from exc
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _set_session_cookie(response, auth)
+    return response
+
+
 @app.get("/v1/lapis-assets/{filename}")
 async def lapis_font_asset(
     filename: str, auth: AuthSession = Depends(current_auth)
@@ -996,6 +1227,17 @@ def _research_product_updates(
                         "importStatus": str(
                             patch.get("import_status", "not_requested")
                         ),
+                    },
+                )
+            )
+        elif patch.get("import_status") in {"completed", "failed"}:
+            projected.append(
+                (
+                    "research.knowledge-decision",
+                    {
+                        "decision": "approved",
+                        "importStatus": str(patch["import_status"]),
+                        "resourceId": str(patch.get("knowledge_resource_id", "")),
                     },
                 )
             )
