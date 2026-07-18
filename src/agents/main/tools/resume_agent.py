@@ -164,5 +164,11 @@ async def resume_agent_node(
     )
 
     return {
-        "messages": [ToolMessage(content=feedback, tool_call_id=tool_call_id)],
+        "messages": [
+            ToolMessage(
+                content=feedback,
+                tool_call_id=tool_call_id,
+                name="resume_agent",
+            )
+        ],
     }

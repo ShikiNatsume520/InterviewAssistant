@@ -274,6 +274,50 @@ class _FakeRagGraph:
         )
 
 
+class _FakeResearchInterruptGraph:
+    async def astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        del args, kwargs
+        yield (
+            ("research_agent:child",),
+            "updates",
+            {"outline": {"phase": "waiting_plan"}},
+        )
+        # 子图 interrupt 会把控制权暂时交还父图，但并未完成工具调用。
+        yield ((), "updates", {"research_agent": None})
+
+    async def aget_state(self, config: dict[str, Any]) -> SimpleNamespace:
+        del config
+        interrupt = SimpleNamespace(value={"phase": "test_interrupt"})
+        task = SimpleNamespace(interrupts=[interrupt])
+        return SimpleNamespace(tasks=[task], values={}, next=["research_agent"])
+
+
+class _FakeResearchCompletionGraph:
+    async def astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        del args, kwargs
+        yield (
+            ("research_agent:child",),
+            "updates",
+            {"compose_report": {"phase": "waiting_knowledge_decision"}},
+        )
+        yield (
+            (),
+            "messages",
+            (
+                ToolMessage(
+                    content='{"outcome":"completed"}',
+                    tool_call_id="research-call-1",
+                    name="research_agent",
+                ),
+                {"langgraph_node": "research_agent"},
+            ),
+        )
+
+    async def aget_state(self, config: dict[str, Any]) -> SimpleNamespace:
+        del config
+        return SimpleNamespace(tasks=[], values={}, next=[])
+
+
 def test_stream_deltas_are_transient_but_complete_events_are_persisted(
     tmp_path: Path,
 ) -> None:
@@ -305,6 +349,7 @@ def test_stream_deltas_are_transient_but_complete_events_are_persisted(
             "task.completed",
         ]
         assert persisted[0].payload["text"] == "你好，世界"
+        assert persisted[1].payload["tool"] == "knowledge_search"
         assert "internal-memory-output" not in repr(persisted)
         assert all(event.event_type != "message.delta" for event in persisted)
     finally:
@@ -345,6 +390,64 @@ def test_stream_emits_only_citations_declared_by_rag_answer(tmp_path: Path) -> N
                 "score": 0.8,
             }
         ]
+    finally:
+        server_app._state.pop("events", None)
+        events.close()
+        identities.close()
+
+
+@pytest.mark.parametrize(
+    ("graph", "expected_transitions"),
+    [
+        (_FakeResearchInterruptGraph(), [("main", "research")]),
+        (
+            _FakeResearchCompletionGraph(),
+            [("main", "research"), ("research", "main")],
+        ),
+    ],
+)
+def test_subagent_returns_to_main_only_after_final_tool_message(
+    tmp_path: Path,
+    graph: Any,
+    expected_transitions: list[tuple[str, str]],
+) -> None:
+    identities, events, thread_id = _stores(tmp_path / "app.sqlite")
+    server_app._state["events"] = events
+
+    async def collect() -> None:
+        async for _ in server_app._stream_graph(
+            graph,
+            {},
+            {"configurable": {"thread_id": thread_id}},
+            thread_id=thread_id,
+            task_id="attempt-research",
+            initial_source="main",
+        ):
+            pass
+
+    try:
+        asyncio.run(collect())
+        persisted = events.page(thread_id, limit=100).events
+        transitions = [
+            (str(event.payload["from"]), str(event.payload["to"]))
+            for event in persisted
+            if event.event_type == "agent.transition"
+        ]
+        assert transitions == expected_transitions
+
+        if isinstance(graph, _FakeResearchInterruptGraph):
+            interrupt = next(
+                event
+                for event in persisted
+                if event.event_type == "interrupt.requested"
+            )
+            assert interrupt.source == "research"
+        else:
+            tool = next(
+                event for event in persisted if event.event_type == "tool.status"
+            )
+            assert tool.source == "research"
+            assert tool.payload["tool"] == "research_agent"
     finally:
         server_app._state.pop("events", None)
         events.close()

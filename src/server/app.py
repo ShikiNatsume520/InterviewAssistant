@@ -68,6 +68,7 @@ from kernel.contracts import (
     ConnectivityCheckPayload,
     OutlineConfirmPayload,
     PlanConfirmPayload,
+    ResearchKnowledgeConfirmPayload,
     ResumeApprovePayload,
     ResumeHitlPayload,
     normalize_resume_value,
@@ -108,7 +109,9 @@ from server.identity import (
 
 SESSION_COOKIE = "ia_session"
 GUEST_BACKUP_COOKIE = "ia_guest_session"
-_LAPIS_FONT_DIR = PROJECT_ROOT / "data" / "lapis-cv-vscode-v2.0.1" / "lapis-cv" / "fonts"
+_LAPIS_FONT_DIR = (
+    PROJECT_ROOT / "data" / "lapis-cv-vscode-v2.0.1" / "lapis-cv" / "fonts"
+)
 _LAPIS_FONT_FILES = {
     "SourceHanSansCN-Regular.ttf",
     "SourceHanSansCN-Medium.ttf",
@@ -609,9 +612,7 @@ async def select_thread_resume(
             _resume_repository().require(auth.principal.id, req.resume_id)
         except ResumeAccessDenied as exc:
             raise HTTPException(status_code=404, detail="简历不存在") from exc
-    thread = _identity_store().select_resume(
-        auth.principal, thread_id, req.resume_id
-    )
+    thread = _identity_store().select_resume(auth.principal, thread_id, req.resume_id)
     return _json_with_session(_thread_json(thread), auth)
 
 
@@ -707,7 +708,9 @@ async def download_resume(
     response = Response(
         content=resume.content.encode("utf-8"),
         media_type="text/markdown; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+        },
     )
     _set_session_cookie(response, auth)
     return response
@@ -741,6 +744,7 @@ _PHASE_TO_SCHEMA: dict[str, type[BaseModel]] = {
     "connectivity_check": ConnectivityCheckPayload,
     "resume_approve": ResumeApprovePayload,
     "resume_hitl": ResumeHitlPayload,
+    "research_knowledge_confirm": ResearchKnowledgeConfirmPayload,
 }
 """interrupt payload phase → contracts schema 映射（``_interrupt_payload`` 校验用）。"""
 
@@ -903,6 +907,101 @@ def _delta_frame(message_id: str, source: EventSource, text: str) -> dict[str, s
     }
 
 
+def _research_product_updates(
+    node_updates: dict[str, Any],
+) -> list[tuple[EventType, dict[str, Any]]]:
+    """把 Research 子图的完整节点更新投影为只读产品事件。"""
+    projected: list[tuple[EventType, dict[str, Any]]] = []
+    for node_name, raw_patch in node_updates.items():
+        if not isinstance(raw_patch, dict):
+            continue
+        patch = cast(dict[str, Any], raw_patch)
+        if node_name == "outline" and isinstance(patch.get("outline"), list):
+            projected.append(
+                (
+                    "research.plan",
+                    {
+                        "keywords": list(patch["outline"]),
+                        "status": "waiting",
+                    },
+                )
+            )
+
+        sources = patch.get("sources")
+        if isinstance(sources, list):
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                projected.append(
+                    (
+                        "research.source",
+                        {
+                            "sourceId": str(source.get("source_id", "")),
+                            "query": str(source.get("query", "")),
+                            "url": str(source.get("url", "")),
+                            "title": str(source.get("title", "")),
+                            "status": str(source.get("status", "pending")),
+                            "failureReason": str(source.get("failure_reason", "")),
+                        },
+                    )
+                )
+
+        phase = patch.get("phase")
+        if isinstance(phase, str):
+            completed = 0
+            total = 0
+            if isinstance(sources, list):
+                total = len(sources)
+                completed = sum(
+                    isinstance(source, dict)
+                    and source.get("status") in {"succeeded", "failed", "skipped"}
+                    for source in sources
+                )
+            projected.append(
+                (
+                    "research.progress",
+                    {
+                        "phase": phase,
+                        "queriesCompleted": int(patch.get("query_cursor", 0)),
+                        "queriesTotal": len(patch.get("outline", []))
+                        if isinstance(patch.get("outline"), list)
+                        else 0,
+                        "sourcesCompleted": completed,
+                        "sourcesTotal": total,
+                    },
+                )
+            )
+
+        if isinstance(patch.get("report_markdown"), str):
+            projected.append(
+                (
+                    "research.report",
+                    {
+                        "status": "ready",
+                        "topic": str(patch.get("gap_topic", "")),
+                        "markdown": patch["report_markdown"],
+                        "summary": str(patch.get("report_summary", "")),
+                        "proposedFileName": str(patch.get("proposed_file_name", "")),
+                    },
+                )
+            )
+
+        decision = patch.get("knowledge_decision")
+        if decision in {"approved", "rejected"}:
+            projected.append(
+                (
+                    "research.knowledge-decision",
+                    {
+                        "decision": decision,
+                        "importStatus": str(
+                            patch.get("import_status", "not_requested")
+                        ),
+                    },
+                )
+            )
+    return projected
+
+
 def _flush_message_buffers(
     buffers: dict[str, tuple[EventSource, str]],
     *,
@@ -944,20 +1043,79 @@ async def _stream_graph(
             principal,
             thread_id,
             active_mode="resume" if current_source == "resume" else "chat",
-            active_agent="resume" if current_source == "resume" else "main",
+            active_agent=(
+                "resume"
+                if current_source == "resume"
+                else "research"
+                if current_source == "research"
+                else "main"
+            ),
         )
     last_message_id: str | None = None
     rag_executed = False
 
-    async for ns_tuple, payload in graph.astream(
+    def transition_frames(
+        from_source: EventSource,
+        to_source: Literal["main", "resume", "research"],
+    ) -> list[dict[str, str]]:
+        frames: list[dict[str, str]] = []
+        completed = _append_product_event(
+            thread_id,
+            "task.status",
+            from_source,
+            {"status": "completed", "label": "已完成"},
+            task_id=task_id,
+        )
+        if completed is not None:
+            frames.append(_event_frame(completed))
+        transition = _append_product_event(
+            thread_id,
+            "agent.transition",
+            "system",
+            {"from": from_source, "to": to_source},
+            task_id=task_id,
+        )
+        if transition is not None:
+            frames.append(_event_frame(transition))
+        if principal is not None:
+            _identity_store().set_agent_activity(
+                principal,
+                thread_id,
+                active_mode="resume" if to_source == "resume" else "chat",
+                active_agent=to_source,
+            )
+        running = _append_product_event(
+            thread_id,
+            "task.status",
+            to_source,
+            {"status": "running", "label": "执行中"},
+            task_id=task_id,
+        )
+        if running is not None:
+            frames.append(_event_frame(running))
+        return frames
+
+    async for streamed in graph.astream(
         input_data,
         config,
-        stream_mode="messages",
+        stream_mode=["messages", "updates"],
         subgraphs=True,
     ):
+        if len(streamed) == 3:
+            ns_tuple, stream_mode, payload = streamed
+        else:  # 兼容精简测试图及旧式单 stream_mode 适配器
+            ns_tuple, payload = streamed
+            stream_mode = "messages"
         ns = _normalize_ns(ns_tuple)
         observed_source = _source_from_namespace(ns)
-        if observed_source is not None and observed_source != current_source:
+        returning_from_subagent = (
+            current_source in {"resume", "research"} and observed_source == "main"
+        )
+        if (
+            observed_source is not None
+            and observed_source != current_source
+            and not returning_from_subagent
+        ):
             for frame in _flush_message_buffers(
                 message_buffers, thread_id=thread_id, task_id=task_id
             ):
@@ -986,7 +1144,13 @@ async def _stream_graph(
                     principal,
                     thread_id,
                     active_mode="resume" if current_source == "resume" else "chat",
-                    active_agent="resume" if current_source == "resume" else "main",
+                    active_agent=(
+                        "resume"
+                        if current_source == "resume"
+                        else "research"
+                        if current_source == "research"
+                        else "main"
+                    ),
                 )
             status_event = _append_product_event(
                 thread_id,
@@ -998,6 +1162,20 @@ async def _stream_graph(
             if status_event is not None:
                 yield _event_frame(status_event)
 
+        if stream_mode == "updates":
+            if observed_source == "research" and isinstance(payload, dict):
+                for event_type, event_payload in _research_product_updates(payload):
+                    research_event = _append_product_event(
+                        thread_id,
+                        event_type,
+                        "research",
+                        event_payload,
+                        task_id=task_id,
+                    )
+                    if research_event is not None:
+                        yield _event_frame(research_event)
+            continue
+
         chunk = (
             payload[0] if isinstance(payload, tuple) and len(payload) >= 1 else payload
         )
@@ -1008,7 +1186,20 @@ async def _stream_graph(
             and isinstance(payload[1], dict)
             else {}
         )
-        source = observed_source or current_source
+        subagent_tool = {
+            "resume": "resume_agent",
+            "research": "research_agent",
+        }.get(current_source)
+        completes_active_subagent = (
+            isinstance(chunk, ToolMessage)
+            and subagent_tool is not None
+            and chunk.name == subagent_tool
+        )
+        source = (
+            current_source
+            if completes_active_subagent
+            else observed_source or current_source
+        )
         if metadata.get("langgraph_node") == "rag_agent":
             rag_executed = True
         visible_message = metadata.get("langgraph_node") == "chat_node"
@@ -1059,6 +1250,10 @@ async def _stream_graph(
                     )
                     if resume_result is not None:
                         yield _event_frame(resume_result)
+                if completes_active_subagent:
+                    for frame in transition_frames(current_source, "main"):
+                        yield frame
+                    current_source = "main"
 
     state = await graph.aget_state(config)
     used_citations: list[Citation] = []
@@ -1260,6 +1455,8 @@ async def chat(
             input_data = {
                 "messages": input_messages,
                 "user_id": auth.principal.id,
+                # reducer 把空列表解释为新用户轮次边界，清除上一轮 RAG 候选。
+                "citations": [],
             }
             user_payload: dict[str, Any] = {"text": req.message}
             if selected_resume is not None:

@@ -14,7 +14,7 @@ export interface ThreadRecord {
   updated_at: string;
   selected_resume_id: string | null;
   active_mode: "chat" | "resume";
-  active_agent: "main" | "resume";
+  active_agent: "main" | "resume" | "research";
 }
 
 export interface ResumeMetadata {

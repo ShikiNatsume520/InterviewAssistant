@@ -18,6 +18,9 @@ from typing import Any, TypedDict
 from agents.main.tools.rag_agent import rag_agent, rag_agent_node
 from agents.main.tools.research_agent import research_agent, research_agent_node
 from agents.main.tools.resume_agent import resume_agent, resume_agent_node
+from agents.rag.prompts import MAIN_AGENT_GUIDANCE as RAG_MAIN_GUIDANCE
+from agents.research.prompts import MAIN_AGENT_GUIDANCE as RESEARCH_MAIN_GUIDANCE
+from agents.resume.prompts import MAIN_AGENT_GUIDANCE as RESUME_MAIN_GUIDANCE
 
 
 class SubAgentMeta(TypedDict):
@@ -28,12 +31,14 @@ class SubAgentMeta(TypedDict):
         tool: ``@tool`` 对象，供 ``ALL_TOOLS`` / ``bind_tools``。
         node: 静态 wrapper 函数引用（关键：是引用，不是生成器产物）。
         route_key: ``route_after_chat`` 返回值。
+        main_guidance: 注入 Main Agent System Prompt 的高层编排建议。
     """
 
     name: str
     tool: Any
     node: Any
     route_key: str
+    main_guidance: str
 
 
 REGISTRY: list[SubAgentMeta] = [
@@ -42,18 +47,21 @@ REGISTRY: list[SubAgentMeta] = [
         "tool": rag_agent,
         "node": rag_agent_node,
         "route_key": "rag_agent",
+        "main_guidance": RAG_MAIN_GUIDANCE,
     },
     {
         "name": "resume_agent",
         "tool": resume_agent,
         "node": resume_agent_node,
         "route_key": "resume_agent",
+        "main_guidance": RESUME_MAIN_GUIDANCE,
     },
     {
         "name": "research_agent",
         "tool": research_agent,
         "node": research_agent_node,
         "route_key": "research_agent",
+        "main_guidance": RESEARCH_MAIN_GUIDANCE,
     },
 ]
 """已登记子智能体清单（新增子 agent 在此追加一行 + 写一个 wrapper 模块）。"""

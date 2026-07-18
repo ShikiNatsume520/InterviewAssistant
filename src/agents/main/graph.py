@@ -27,7 +27,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.store.base import BaseStore
 
 from agents.main.nodes.memory import load_memory_context, save_memory_node, set_store
-from agents.main.prompts import SYSTEM_PROMPT
+from agents.main.prompts import build_system_prompt
 from agents.main.registry import REGISTRY
 from agents.main.routing import route_after_chat
 from agents.main.state import MainState
@@ -47,6 +47,12 @@ BASIC_TOOLS: list[Any] = [*RESUME_RESOURCE_TOOLS]
 ALL_TOOLS: list[Any] = BASIC_TOOLS + [m["tool"] for m in REGISTRY]
 """LLM bind_tools 的完整工具列表（含子智能体工具，由 ``REGISTRY`` 派生）。"""
 
+_REGISTERED_GUIDANCE: tuple[tuple[str, str], ...] = tuple(
+    (meta["name"], meta["main_guidance"]) for meta in REGISTRY
+)
+STATIC_SYSTEM_PROMPT = build_system_prompt(_REGISTERED_GUIDANCE)
+"""按实际注册子智能体组合并缓存的进程级静态 Prompt。"""
+
 
 # --------------------------------------------------------------------------- #
 # 短期记忆：system prompt
@@ -54,8 +60,8 @@ ALL_TOOLS: list[Any] = BASIC_TOOLS + [m["tool"] for m in REGISTRY]
 
 
 def _build_system_prompt() -> str:
-    """构建 system prompt（仅角色与行为规范，工具定义由 ``bind_tools`` 提供）。"""
-    return SYSTEM_PROMPT
+    """返回缓存的静态 Prompt；用户 Memory 仍在 chat_node 中逐轮追加。"""
+    return STATIC_SYSTEM_PROMPT
 
 
 # --------------------------------------------------------------------------- #

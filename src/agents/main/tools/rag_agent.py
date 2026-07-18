@@ -25,6 +25,60 @@ from agents.rag.state import Citation
 from kernel.logging import dlog
 
 
+def build_rag_tool_content(
+    query: str, citations: list[Citation], gap_topic: str | None
+) -> str:
+    """构造交给 Main Agent 的单次检索结果与消费约束。"""
+    if gap_topic:
+        return (
+            "[RAG 检索结果]\n"
+            "状态：knowledge_gap\n"
+            f"知识缺口：{gap_topic}\n\n"
+            "[回答要求]\n"
+            "本地知识库不足以可靠回答该问题。请明确告知用户当前知识库资料不足，"
+            "并询问用户是否允许使用 Research Agent 进行深度搜索。"
+            "获得用户明确同意前，不得自行启动深度搜索。"
+            "本次回答不得输出 `## 参考资料` 区块。"
+        )
+
+    if not citations:
+        return (
+            "[RAG 检索结果]\n"
+            "状态：no_results\n"
+            f"检索主题：{query}\n\n"
+            "[回答要求]\n"
+            "本地知识库没有返回可用资料。请明确告知用户当前知识库资料不足，"
+            "并询问用户是否允许使用 Research Agent 进行深度搜索。"
+            "获得用户明确同意前，不得自行启动深度搜索。"
+            "本次回答不得输出 `## 参考资料` 区块。"
+        )
+
+    parts = ["[RAG 检索结果]", "状态：ok", "以下资料仅为候选，不要求全部使用："]
+    for index, citation in enumerate(citations, 1):
+        parts.append(
+            f"[{index}] {citation['file_path']} "
+            f"L{citation['start_line']}-{citation['end_line']} "
+            f"| 置信度 {citation['score']:.2f}\n"
+            f"    {citation['content']}"
+        )
+    parts.extend(
+        (
+            "[回答要求]",
+            "1. 只采用与用户问题相关且确实支撑回答的候选资料，不要强行使用全部资料。\n"
+            "2. 正文实际采用资料时，在对应内容后使用从 `[1]` 开始连续编号的角标。\n"
+            "3. 回答末尾必须输出严格的引用区块，格式如下：\n"
+            "## 参考资料\n"
+            "[1] 原样复制候选资料的文件路径 L起始行-结束行\n"
+            "4. 最终引用编号按实际使用顺序重新编号，不必沿用候选编号。\n"
+            "5. 只列实际使用的资料；文件路径和行区间必须从候选资料原样复制。\n"
+            "6. 引用行不得添加项目符号、置信度或内容摘要；行号连接符必须使用半角 `-`。\n"
+            "7. `## 参考资料` 必须是回答最后一个区块，其后不得继续输出。\n"
+            "8. 如果最终没有采用任何候选资料，则不要输出 `## 参考资料` 区块。",
+        )
+    )
+    return "\n\n".join(parts)
+
+
 @tool
 def rag_agent(
     query: str = Field(
@@ -123,21 +177,18 @@ async def rag_agent_node(
         files=[c.get("file_path") for c in citations],
     )
 
-    if gap_topic:
-        content = f"未在知识库中找到「{gap_topic}」的相关内容。"
-    elif citations:
-        parts: list[str] = []
-        for i, c in enumerate(citations, 1):
-            parts.append(
-                f"[{i}] {c['file_path']} L{c['start_line']}-{c['end_line']} "
-                f"| 置信度 {c['score']:.2f}\n"
-                f"    {c['content']}"
-            )
-        content = "\n\n".join(parts)
-    else:
-        content = "未检索到相关内容。"
+    content = build_rag_tool_content(query, citations, gap_topic)
 
-    return {
-        "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)],
-        "citations": citations,
+    update: dict[str, Any] = {
+        "messages": [
+            ToolMessage(
+                content=content,
+                tool_call_id=tool_call_id,
+                name="rag_agent",
+            )
+        ],
     }
+    # 无候选时不写 citations：同一超级步中另一个并行 RAG 的有效结果不能被清空。
+    if citations:
+        update["citations"] = citations
+    return update

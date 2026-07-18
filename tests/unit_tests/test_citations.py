@@ -1,4 +1,51 @@
+from typing import Any
+
+from langgraph.graph import END, START, StateGraph
+
+from agents.main.state import MainState, merge_current_turn_citations
+from agents.rag.state import Citation
 from server.citations import extract_used_citations, parse_reference_tail
+
+
+def _candidate(path: str, score: float) -> Citation:
+    return {
+        "file_path": path,
+        "start_line": 1,
+        "end_line": 2,
+        "content": path,
+        "score": score,
+    }
+
+
+def test_citation_reducer_resets_new_turn_and_merges_parallel_results() -> None:
+    old = [_candidate("old.md", 0.5)]
+    assert merge_current_turn_citations(old, []) == []
+
+    workflow = StateGraph(MainState)
+
+    def first(_: MainState) -> dict[str, Any]:
+        return {"citations": [_candidate("a.md", 0.7)]}
+
+    def second(_: MainState) -> dict[str, Any]:
+        return {
+            "citations": [
+                _candidate("a.md", 0.9),
+                _candidate("b.md", 0.8),
+            ]
+        }
+
+    workflow.add_node("first", first)
+    workflow.add_node("second", second)
+    workflow.add_edge(START, "first")
+    workflow.add_edge(START, "second")
+    workflow.add_edge("first", END)
+    workflow.add_edge("second", END)
+
+    result = workflow.compile().invoke({"citations": []})
+    assert [(item["file_path"], item["score"]) for item in result["citations"]] == [
+        ("a.md", 0.9),
+        ("b.md", 0.8),
+    ]
 
 
 def test_parse_strict_reference_tail_with_chinese_and_spaced_filename() -> None:
