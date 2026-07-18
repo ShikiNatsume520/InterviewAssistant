@@ -9,6 +9,8 @@ export function loadModelConfig(): ModelConfig | null {
     const value = JSON.parse(raw) as Partial<ModelConfig>;
     if (!value.apiKey || !value.baseUrl || !value.model) return null;
     return {
+      providerId: value.providerId === "openai" || value.providerId === "custom" ? value.providerId : "deepseek",
+      apiFormat: "openai-chat-completions",
       apiKey: value.apiKey,
       baseUrl: value.baseUrl,
       model: value.model,
@@ -30,6 +32,7 @@ export function modelHeaders(config: ModelConfig | null): HeadersInit {
   if (!config) return {};
   return {
     "X-IA-API-Key": config.apiKey,
+    "X-IA-API-Format": config.apiFormat,
     "X-IA-Base-URL": config.baseUrl,
     "X-IA-Model": config.model,
   };

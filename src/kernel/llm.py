@@ -36,6 +36,8 @@ def get_chat_model(
     """
     runtime = get_runtime_model()
     if runtime is not None:
+        if runtime.api_format != "openai-chat-completions":
+            raise ValueError(f"unsupported API format: {runtime.api_format}")
         selected_model = runtime.model
         llm: BaseChatModel = ChatOpenAI(
             model=selected_model,

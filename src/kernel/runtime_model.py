@@ -5,7 +5,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, Literal
+
+ApiFormat = Literal["openai-chat-completions"]
 
 
 @dataclass(frozen=True)
@@ -15,6 +17,7 @@ class RuntimeModelConfig:
     api_key: str
     base_url: str
     model: str
+    api_format: ApiFormat = "openai-chat-completions"
 
 
 _runtime_model_config: ContextVar[RuntimeModelConfig | None] = ContextVar(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -71,6 +72,53 @@ def test_guest_model_headers_are_required_and_http_is_local_only() -> None:
     assert insecure.value.detail["code"] == "HTTPS_REQUIRED"
 
 
+def test_guest_provider_requires_https_except_for_local_debugging() -> None:
+    guest = Principal(id="guest", kind="guest")
+    common_headers = {
+        "X-IA-API-Key": "guest-secret",
+        "X-IA-Model": "example-chat",
+    }
+    with pytest.raises(HTTPException) as insecure_provider:
+        _runtime_model_from_request(
+            _request(
+                headers={
+                    **common_headers,
+                    "X-IA-Base-URL": "http://models.example/v1",
+                }
+            ),
+            guest,
+        )
+    assert insecure_provider.value.detail["code"] == "PROVIDER_HTTPS_REQUIRED"
+
+    runtime = _runtime_model_from_request(
+        _request(
+            headers={
+                **common_headers,
+                "X-IA-Base-URL": "http://127.0.0.1:11434/v1",
+            }
+        ),
+        guest,
+    )
+    assert runtime.base_url == "http://127.0.0.1:11434/v1"
+
+
+def test_guest_rejects_unsupported_api_format() -> None:
+    guest = Principal(id="guest", kind="guest")
+    with pytest.raises(HTTPException) as unsupported:
+        _runtime_model_from_request(
+            _request(
+                headers={
+                    "X-IA-API-Key": "guest-secret",
+                    "X-IA-Base-URL": "https://models.example/v1",
+                    "X-IA-Model": "example-chat",
+                    "X-IA-API-Format": "anthropic-messages",
+                }
+            ),
+            guest,
+        )
+    assert unsupported.value.detail["code"] == "API_FORMAT_UNSUPPORTED"
+
+
 def test_developer_ignores_browser_model_headers() -> None:
     developer = Principal(id="developer-local", kind="developer")
     assert _runtime_model_from_request(_request(), developer) is None
@@ -93,3 +141,25 @@ def test_chat_model_uses_temporary_runtime_and_clears_it() -> None:
     assert kwargs["model"] == "runtime-model"
     assert kwargs["base_url"] == "https://models.example/v1"
     assert kwargs["api_key"].get_secret_value() == "isolated-secret"
+
+
+@pytest.mark.anyio
+async def test_runtime_model_is_isolated_between_concurrent_tasks() -> None:
+    first = RuntimeModelConfig("first-secret", "https://first.example/v1", "first")
+    second = RuntimeModelConfig("second-secret", "https://second.example/v1", "second")
+    ready = asyncio.Event()
+    observations: dict[str, RuntimeModelConfig | None] = {}
+
+    async def observe(name: str, runtime: RuntimeModelConfig) -> None:
+        with use_runtime_model(runtime):
+            if name == "first":
+                ready.set()
+                await asyncio.sleep(0)
+            else:
+                await ready.wait()
+            observations[name] = get_runtime_model()
+
+    await asyncio.gather(observe("first", first), observe("second", second))
+
+    assert observations == {"first": first, "second": second}
+    assert get_runtime_model() is None
