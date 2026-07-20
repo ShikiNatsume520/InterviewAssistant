@@ -46,12 +46,6 @@ format format_diff:
 	ruff format $(PYTHON_FILES)
 	ruff check --select I --fix $(PYTHON_FILES)
 
-spell_check:
-	codespell --toml pyproject.toml
-
-spell_fix:
-	codespell --toml pyproject.toml -w
-
 ######################
 # HELP
 ######################
@@ -64,4 +58,3 @@ help:
 	@echo 'tests                        - run unit tests'
 	@echo 'test TEST_FILE=<test_file>   - run all tests in file'
 	@echo 'test_watch                   - run unit tests in watch mode'
-
