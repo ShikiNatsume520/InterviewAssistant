@@ -41,6 +41,7 @@ packages = ["kernel", "agents", "server"]
 "*" = ["py.typed"]
 
 [tool.ruff]
+extend-exclude = ["prototypes"]
 lint.select = [
     "E",    # pycodestyle
     "F",    # pyflakes
