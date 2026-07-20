@@ -18,6 +18,8 @@ dependencies = [
     "uvicorn>=0.32.0",
     "sse-starlette>=2.1.0",
     "langgraph-checkpoint-sqlite>=3.1.0",
+    "ddgs>=9.14.4,<10",
+    "trafilatura>=2.1.0,<3",
 ]
 
 
