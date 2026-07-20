@@ -40,7 +40,11 @@ def get_collection(
     )
 
 
-def upsert_chunks(client: chromadb.api.ClientAPI, chunks: list[Chunk]) -> int:
+def upsert_chunks(
+    client: chromadb.api.ClientAPI,
+    chunks: list[Chunk],
+    name: str = COLLECTION_NAME,
+) -> int:
     """把切片向量化并 upsert 进 Chroma collection（按 chunk_id 去重覆盖）。
 
     Args:
@@ -52,13 +56,27 @@ def upsert_chunks(client: chromadb.api.ClientAPI, chunks: list[Chunk]) -> int:
     """
     if not chunks:
         return 0
-    col = get_collection(client)
+    col = get_collection(client, name)
     col.upsert(
         ids=[chunk_id(c) for c in chunks],
         documents=[c["content"] for c in chunks],
         metadatas=[chunk_to_metadata(c) for c in chunks],
     )
     return len(chunks)
+
+
+def delete_resource_chunks(
+    client: chromadb.api.ClientAPI, resource_id: str, name: str = COLLECTION_NAME
+) -> None:
+    """按稳定 resource_id 删除一个知识资源的全部向量切片。"""
+    get_collection(client, name).delete(where={"resource_id": resource_id})
+
+
+def delete_file_chunks(
+    client: chromadb.api.ClientAPI, file_path: str, name: str = COLLECTION_NAME
+) -> None:
+    """兼容删除重构前没有 resource_id metadata 的公共文件向量。"""
+    get_collection(client, name).delete(where={"file_path": file_path})
 
 
 def query_chunks(

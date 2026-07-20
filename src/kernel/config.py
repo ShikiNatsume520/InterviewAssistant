@@ -29,7 +29,7 @@ EXTRACTION_MODEL: str = os.getenv("IA_EXTRACTION_MODEL", DEFAULT_MODEL)
 """长期记忆提取（``save_memory_node``）使用的模型。"""
 
 RESUME_MODEL: str = os.getenv("IA_RESUME_MODEL", DEFAULT_MODEL)
-"""简历优化子图（``plan_node`` + ``react_router``）使用的模型。"""
+"""简历优化子图使用的模型。"""
 
 RESEARCH_MODEL: str = os.getenv("IA_RESEARCH_MODEL", DEFAULT_MODEL)
 """自主深研子图（outline / distill / finalize）使用的模型。"""
@@ -43,3 +43,24 @@ DEEPSEEK_API_KEY: str | None = os.getenv("DEEPSEEK_API_KEY")
 
 DEEPSEEK_API_URL: str | None = os.getenv("DEEPSEEK_API_URL")
 """DeepSeek API 基地址。"""
+
+# --------------------------------------------------------------------------- #
+# Web 身份与开发人员模式
+# --------------------------------------------------------------------------- #
+
+DEV_MODE_ENABLED: bool = os.getenv("IA_DEV_MODE", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+"""是否启用开发人员登录端点；生产环境默认关闭。"""
+
+DEV_ACCESS_TOKEN: str | None = os.getenv("IA_DEV_ACCESS_TOKEN")
+"""开发人员登录凭证；只在登录请求中比较，不写入应用数据库。"""
+
+COOKIE_SECURE: bool = os.getenv("IA_COOKIE_SECURE", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+"""身份 Cookie 是否仅通过 HTTPS 发送；生产部署必须设为 true。"""

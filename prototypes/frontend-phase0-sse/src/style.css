@@ -1,0 +1,7 @@
+:root { font-family: Inter, "Microsoft YaHei", sans-serif; color: #20232a; background: #f5f6f8; }
+body { margin: 0; }
+main { width: min(760px, calc(100% - 48px)); margin: 48px auto; padding: 28px; background: white; border-radius: 16px; box-shadow: 0 8px 30px #18202c14; }
+.actions { display: flex; gap: 10px; margin: 20px 0; }
+button { padding: 9px 14px; border: 1px solid #ccd2dd; border-radius: 8px; background: #fff; cursor: pointer; }
+button:first-child { color: white; background: #6257d9; border-color: #6257d9; }
+li { padding: 8px 0; }

@@ -27,24 +27,31 @@ from langgraph.prebuilt import ToolNode
 from langgraph.store.base import BaseStore
 
 from agents.main.nodes.memory import load_memory_context, save_memory_node, set_store
-from agents.main.prompts import SYSTEM_PROMPT
+from agents.main.prompts import build_system_prompt
 from agents.main.registry import REGISTRY
 from agents.main.routing import route_after_chat
 from agents.main.state import MainState
+from agents.main.tools.resume_resources import RESUME_RESOURCE_TOOLS
 from kernel.config import CHAT_MODEL
 from kernel.llm import get_chat_model
-from kernel.logging import dlog, slog, summarize_messages
+from kernel.logging import dlog, summarize_messages
 from kernel.persistence import get_store
 
 # --------------------------------------------------------------------------- #
 # 工具列表（后续新增子图时扩展）
 # --------------------------------------------------------------------------- #
 
-BASIC_TOOLS: list[Any] = []
+BASIC_TOOLS: list[Any] = [*RESUME_RESOURCE_TOOLS]
 """普通工具列表（直接由 ToolNode 执行，无需包装节点拦截）。"""
 
 ALL_TOOLS: list[Any] = BASIC_TOOLS + [m["tool"] for m in REGISTRY]
 """LLM bind_tools 的完整工具列表（含子智能体工具，由 ``REGISTRY`` 派生）。"""
+
+_REGISTERED_GUIDANCE: tuple[tuple[str, str], ...] = tuple(
+    (meta["name"], meta["main_guidance"]) for meta in REGISTRY
+)
+STATIC_SYSTEM_PROMPT = build_system_prompt(_REGISTERED_GUIDANCE)
+"""按实际注册子智能体组合并缓存的进程级静态 Prompt。"""
 
 
 # --------------------------------------------------------------------------- #
@@ -53,8 +60,8 @@ ALL_TOOLS: list[Any] = BASIC_TOOLS + [m["tool"] for m in REGISTRY]
 
 
 def _build_system_prompt() -> str:
-    """构建 system prompt（仅角色与行为规范，工具定义由 ``bind_tools`` 提供）。"""
-    return SYSTEM_PROMPT
+    """返回缓存的静态 Prompt；用户 Memory 仍在 chat_node 中逐轮追加。"""
+    return STATIC_SYSTEM_PROMPT
 
 
 # --------------------------------------------------------------------------- #
@@ -62,17 +69,8 @@ def _build_system_prompt() -> str:
 # --------------------------------------------------------------------------- #
 
 
-# chat_node 使用的模型（bind_tools 后），由 _init_chat 初始化
-_chat_model: Any = None
-
-
 def _init_chat(store: BaseStore) -> None:
-    """初始化 ``chat_node`` 依赖的全局状态。
-
-    在 ``build_main_graph`` 中调用，Store 实例在此注入。
-    """
-    global _chat_model
-    _chat_model = get_chat_model(CHAT_MODEL, tools=ALL_TOOLS)
+    """初始化 ``chat_node`` 使用的共享 Store。"""
     set_store(store)
 
 
@@ -81,30 +79,20 @@ def chat_node(state: MainState) -> dict[str, Any]:
 
     每次调用时从 ``agent.memory`` 读取当前用户记忆，拼接到 system prompt 尾部。
     """
-    if _chat_model is None:
-        raise RuntimeError("chat_node 未初始化——请确保 _init_chat() 已被调用")
-
     user_id = state.get("user_id", "default")
     dlog(
         "main",
         "chat_node",
         "进入节点",
         user_id=user_id,
-        msgs=summarize_messages(state.get("messages", [])),
-    )
-    slog(
-        "main",
-        "chat_node",
-        "进入节点",
-        user_id=user_id,
         msgs_n=len(state.get("messages", [])),
+        msgs=summarize_messages(state.get("messages", [])),
     )
     mc = load_memory_context(user_id)
     system_prompt = _build_system_prompt()
     if mc:
         system_prompt += f"\n\n## Memory\n{mc}"
         dlog("main", "chat_node", "已注入长期记忆", memory_len=len(mc))
-        slog("main", "chat_node", "已注入长期记忆", memory_len=len(mc))
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -112,14 +100,12 @@ def chat_node(state: MainState) -> dict[str, Any]:
             ("placeholder", "{messages}"),
         ]
     )
-    chain = prompt | _chat_model
+    chat_model = get_chat_model(CHAT_MODEL, tools=ALL_TOOLS)
+    chain = prompt | chat_model
     response = chain.invoke({"messages": state.get("messages", [])})
     tcs = getattr(response, "tool_calls", []) or []
     if tcs:
         dlog(
-            "main", "chat_node", "LLM 决策调用工具", tools=[t.get("name") for t in tcs]
-        )
-        slog(
             "main", "chat_node", "LLM 决策调用工具", tools=[t.get("name") for t in tcs]
         )
     else:
@@ -129,7 +115,6 @@ def chat_node(state: MainState) -> dict[str, Any]:
             else str(response.content)
         )
         dlog("main", "chat_node", "LLM 直接回复", reply_len=len(c))
-        slog("main", "chat_node", "LLM 直接回复", reply_len=len(c))
     return {"messages": [response]}
 
 
@@ -176,6 +161,9 @@ def build_main_graph(
     # ── 连线 ──
     workflow.set_entry_point("chat_node")
 
+    # path_map 声明 conditional edge 的所有可达节点——route_after_chat 运行时
+    # 返回 list[Send] 直达节点（不经 path_map 映射），但 Studio 静态分析靠
+    # path_map 画 chat_node → 各节点的入边，故必须列出全部可达节点。
     path_map: dict[Any, str] = {
         "save_memory": "save_memory",
         "tools_node": "tools_node",

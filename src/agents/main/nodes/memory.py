@@ -23,7 +23,7 @@ from agents.main.prompts import build_extraction_prompt
 from agents.main.state import MainState
 from kernel.config import EXTRACTION_MODEL
 from kernel.llm import get_chat_model
-from kernel.logging import slog
+from kernel.logging import dlog
 
 # ═══════════════════════════════════════════════════════════════════════ #
 # 全局变量（由 build_main_graph → _init_chat 初始化）
@@ -35,7 +35,6 @@ _memory_cache: dict[str, str] = {}
 _store: BaseStore | None = None
 """全局 Store 实例（持久化 ``SqliteStore``），由 ``set_store()`` 设置。"""
 
-_extraction_llm: Any = None
 """记忆提取 LLM（惰性初始化）。"""
 
 
@@ -91,16 +90,14 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
     只处理 ``HumanMessage`` + ``AIMessage`` 两类消息；
     用 LLM 去重后写入 ``Store.put()``。
     """
-    global _extraction_llm
-
     messages = state.get("messages", [])
     user_id = state.get("user_id", "default")
-    slog("main", "save_memory", "进入节点", user_id=user_id, msgs_n=len(messages))
+    dlog("main", "save_memory", "进入节点", user_id=user_id, msgs_n=len(messages))
 
     # 过滤：只保留 User + AI 消息
     relevant = [m for m in messages if isinstance(m, (HumanMessage, AIMessage))]
     if not relevant:
-        slog("main", "save_memory", "无 User/AI 消息，跳过")
+        dlog("main", "save_memory", "无 User/AI 消息，跳过")
         return {}
 
     # 读取已有事实用于去重
@@ -116,7 +113,7 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
         if existing_facts
         else "(无已有事实)"
     )
-    slog("main", "save_memory", "已有事实", existing_n=len(existing_facts))
+    dlog("main", "save_memory", "已有事实", existing_n=len(existing_facts))
 
     # 格式化对话
     conv_parts: list[str] = []
@@ -131,19 +128,17 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
     conv_text = "\n\n".join(conv_parts)
 
     # LLM 提取
-    if _extraction_llm is None:
-        _extraction_llm = get_chat_model(EXTRACTION_MODEL)
-
+    extraction_llm = get_chat_model(EXTRACTION_MODEL)
     prompt = build_extraction_prompt(
         existing_facts=existing_str,
         conversation=conv_text,
     )
-    slog("main", "save_memory", "调用 LLM 提取事实")
-    response = _extraction_llm.invoke(prompt)
+    dlog("main", "save_memory", "调用 LLM 提取事实")
+    response = extraction_llm.invoke(prompt)
     raw = (
         response.content if isinstance(response.content, str) else str(response.content)
     )
-    slog("main", "save_memory", "LLM 返回", raw_preview=raw[:200])
+    dlog("main", "save_memory", "LLM 返回", raw_preview=raw[:200])
 
     # 清理可能的 markdown 代码块标记
     raw = raw.strip()
@@ -159,7 +154,7 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
         if not isinstance(new_facts, list):
             new_facts = []
     except json.JSONDecodeError:
-        slog("main", "save_memory", "JSON 解析失败，跳过", raw_preview=raw[:200])
+        dlog("main", "save_memory", "JSON 解析失败，跳过", raw_preview=raw[:200])
         return {}
 
     # 写入 Store（按已有事实去重）
@@ -179,9 +174,9 @@ def save_memory_node(state: MainState) -> dict[str, Any]:
         _store.put(("memory", user_id, "facts"), f"fact_{uuid4().hex[:8]}", entry)  # type: ignore[union-attr]
         known.add(text)
         written.append(entry)
-        slog("main", "save_memory", "写入 Store", fact=text, category=entry["category"])
+        dlog("main", "save_memory", "写入 Store", fact=text, category=entry["category"])
 
-    slog(
+    dlog(
         "main",
         "save_memory",
         "完成",

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>阶段 2：统一产品时间线原型</title>
+    <style>
+      :root {
+        color: #172036;
+        background: #edf1f7;
+        font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-width: 1100px; }
+      .app { display: grid; grid-template-columns: 270px 1fr; height: 100vh; }
+      aside { background: #182033; color: #dbe4f5; padding: 24px 16px; }
+      .brand { font-size: 18px; font-weight: 700; margin: 0 8px 24px; }
+      .new { width: 100%; padding: 11px; border: 1px solid #53617a; border-radius: 10px; background: #273149; color: white; }
+      .section { margin: 24px 8px 10px; color: #8492aa; font-size: 12px; }
+      .thread { padding: 12px; border-radius: 10px; margin-bottom: 6px; font-size: 14px; }
+      .thread.active { background: #35415c; color: white; }
+      .thread small { display: block; color: #96a4bb; margin-top: 5px; }
+      main { display: grid; grid-template-rows: 64px 1fr 92px; min-width: 0; background: #f7f9fc; }
+      header { display: flex; align-items: center; justify-content: space-between; padding: 0 30px; border-bottom: 1px solid #dfe5ee; background: white; }
+      header h1 { font-size: 17px; margin: 0; }
+      .status { color: #4f6078; font-size: 13px; }
+      .timeline { overflow: auto; padding: 30px max(40px, calc((100% - 850px) / 2)); }
+      .event { display: flex; gap: 12px; margin: 19px 0; align-items: flex-start; }
+      .event.user { flex-direction: row-reverse; }
+      .avatar { flex: 0 0 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; color: white; font-size: 12px; font-weight: 700; box-shadow: 0 4px 12px #26334d22; }
+      .main { background: #4f6af0; }
+      .resume { background: #8a55d7; }
+      .research { background: #168a73; }
+      .user .avatar { background: #405069; }
+      .content { max-width: min(720px, 78%); }
+      .name { color: #6b7890; font-size: 12px; margin: 0 4px 6px; }
+      .run-state { color: #21846e; background: #e6f5f0; border-radius: 12px; padding: 3px 7px; margin-left: 7px; font-size: 11px; }
+      .user .name { text-align: right; }
+      .bubble { padding: 13px 16px; background: white; border: 1px solid #e0e6ef; border-radius: 5px 15px 15px; line-height: 1.65; box-shadow: 0 3px 12px #26334d0c; }
+      .user .bubble { background: #5269dc; color: white; border: 0; border-radius: 15px 5px 15px 15px; }
+      .transition { display: flex; align-items: center; gap: 12px; color: #758198; font-size: 12px; margin: 27px 0; }
+      .transition::before, .transition::after { content: ""; height: 1px; background: #dce2ec; flex: 1; }
+      .card { background: white; border: 1px solid #dfe5ee; border-radius: 14px; padding: 16px; min-width: 470px; box-shadow: 0 5px 18px #26334d0c; }
+      .card-title { display: flex; align-items: center; justify-content: space-between; font-weight: 650; }
+      .tag { background: #f0ebfb; color: #7545bc; border-radius: 20px; padding: 4px 9px; font-size: 11px; }
+      .steps { margin: 14px 0 0; padding: 0; list-style: none; color: #58667c; font-size: 13px; }
+      .steps li { padding: 7px 0; border-top: 1px solid #eef1f6; }
+      .steps b { color: #2c9c7a; margin-right: 8px; }
+      .cursor { text-align: center; color: #8a96aa; font-size: 11px; margin: 10px; }
+      footer { padding: 16px max(40px, calc((100% - 850px) / 2)); border-top: 1px solid #dfe5ee; background: white; }
+      .composer { height: 58px; display: flex; align-items: center; padding: 0 12px 0 18px; border: 1px solid #ccd5e2; border-radius: 14px; color: #909bad; }
+      .send { margin-left: auto; background: #425bd1; color: white; border: 0; border-radius: 9px; padding: 10px 18px; }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside>
+        <div class="brand">Interview Assistant</div>
+        <button class="new">＋ 新建会话</button>
+        <div class="section">最近会话</div>
+        <div class="thread active">产品经理简历优化<small>Resume Agent · 等待审批</small></div>
+        <div class="thread">LangGraph 面试准备<small>Main Agent · 昨天</small></div>
+        <div class="thread">AI 行业深研<small>Research Agent · 已完成</small></div>
+      </aside>
+      <main>
+        <header>
+          <h1>产品经理简历优化</h1>
+          <span class="status">游客模式 · 历史已同步</span>
+        </header>
+        <section class="timeline">
+          <div class="cursor">已从事件 #18 恢复 · 重复事件自动忽略</div>
+          <article class="event user">
+            <div class="avatar">你</div>
+            <div class="content"><div class="name">你 · 10:32</div><div class="bubble">请结合前面的岗位分析，帮我优化这份简历。</div></div>
+          </article>
+          <article class="event">
+            <div class="avatar main">M</div>
+            <div class="content"><div class="name">Main Agent · 10:32 <span class="run-state">已完成</span></div><div class="bubble">我会把岗位目标和优化重点交给 Resume Agent，后续仍在当前对话中继续。</div></div>
+          </article>
+          <div class="transition">Main Agent 已将任务交接给 Resume Agent</div>
+          <article class="event">
+            <div class="avatar resume">R</div>
+            <div class="content">
+              <div class="name">Resume Agent · 10:33 <span class="run-state">正在生成修改建议</span></div>
+              <div class="card">
+                <div class="card-title">简历分析过程 <span class="tag">等待审批</span></div>
+                <ul class="steps">
+                  <li><b>✓</b>读取 Markdown 简历</li>
+                  <li><b>✓</b>提取目标岗位关键词</li>
+                  <li><b>●</b>生成第 1 条修改建议</li>
+                </ul>
+              </div>
+            </div>
+          </article>
+          <article class="event">
+            <div class="avatar resume">R</div>
+            <div class="content"><div class="name">Resume Agent · 10:33 <span class="run-state">已完成</span></div><div class="bubble">第一条建议已准备好。进入简历工作区后可以逐条审批。</div></div>
+          </article>
+        </section>
+        <footer><div class="composer">继续输入消息……<button class="send">发送</button></div></footer>
+      </main>
+    </div>
+  </body>
+</html>

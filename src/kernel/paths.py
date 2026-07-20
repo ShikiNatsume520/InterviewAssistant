@@ -14,8 +14,17 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 MARKDOWN_DIR: Path = PROJECT_ROOT / "data" / "markdown"
 """本地 markdown 知识库目录。"""
 
+RESUMES_DIR: Path = PROJECT_ROOT / "data" / "resumes"
+"""用户简历目录（lapis-cv 格式 markdown，``resume_agent`` 据此读写）。"""
+
 CHROMA_PATH: Path = PROJECT_ROOT / "data" / "chroma"
 """Chroma 向量库持久化目录。"""
 
 INDEX_MD_PATH: Path = PROJECT_ROOT / "data" / "index.md"
 """LLM 维护的文件级语义索引文件路径。"""
+
+LOGS_DIR: Path = PROJECT_ROOT / "logs"
+"""调试日志目录（``debug_YYYYMMDD_HHMMSS.log`` 落盘于此）。"""
+
+PERSONAL_KNOWLEDGE_DIR: Path = PROJECT_ROOT / "data" / "knowledge" / "principals"
+"""按 principal 物理隔离的个人知识库根目录。"""

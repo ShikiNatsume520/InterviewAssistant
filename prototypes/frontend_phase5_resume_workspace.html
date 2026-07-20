@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>阶段 5 · Resume 工作区原型</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#f5f6fa;color:#202331;font:14px/1.55 Inter,"Microsoft YaHei",sans-serif}.app{display:grid;grid-template-columns:220px minmax(480px,1fr) 420px;height:100vh}.side{padding:20px 14px;background:#171a24;color:#d9dcec}.brand{font-weight:750;font-size:17px;margin:0 8px 24px}.new{width:100%;padding:10px;border:1px solid #414659;border-radius:10px;background:#272b39;color:#fff}.label{margin:22px 8px 8px;color:#8f95aa;font-size:11px}.thread{padding:10px;border-radius:9px;background:#292e3e}.thread small{display:block;color:#aeb5cb}.workspace{min-width:0;border-right:1px solid #e0e2ea;background:#fff;display:flex;flex-direction:column}.work-head,.chat-head{height:70px;padding:14px 20px;border-bottom:1px solid #e7e8ee}.work-head{display:flex;justify-content:space-between;align-items:center}.work-head strong{display:block}.work-head span{font-size:12px;color:#767d91}.badge{padding:5px 9px;border-radius:999px;background:#f0edff;color:#654cca;font-size:12px}.tabs{display:flex;gap:6px;padding:12px 20px 0}.tabs button{border:0;border-radius:8px;padding:7px 12px;background:#f0f1f5;color:#62697b}.tabs .active{background:#252a38;color:#fff}.doc{padding:20px;overflow:auto}.section{margin-bottom:18px;padding:15px 17px;border:1px solid #e5e7ed;border-radius:12px}.section h2{margin:0 0 9px;font-size:15px}.muted{color:#80879a}.diff del,.diff ins{display:block;text-decoration:none;margin:5px -7px;padding:6px 8px;border-radius:6px}.diff del{background:#fff0f0;color:#a43d3d}.diff ins{background:#ecf9f0;color:#257445}.current{outline:2px solid #8e7cff;border-color:transparent}.chat{min-width:0;display:flex;flex-direction:column}.chat-head h2{margin:0;font-size:17px}.chat-head span{color:#737a8e;font-size:12px}.timeline{flex:1;overflow:auto;padding:18px}.agent{display:grid;grid-template-columns:34px 1fr;gap:9px;margin-bottom:17px}.avatar{width:32px;height:32px;border-radius:10px;background:#ede9ff;color:#5d48b6;display:grid;place-items:center;font-weight:700}.bubble{padding:11px 13px;border-radius:12px;background:#fff;border:1px solid #e3e5ec}.approval{margin-top:10px;padding:13px;border-radius:12px;background:#fff;border:1px solid #dcdfea;box-shadow:0 8px 26px #2222}.approval h3{margin:0 0 5px;font-size:14px}.approval small{color:#777f93}.actions{display:flex;gap:7px;margin-top:12px}.actions button{border:0;border-radius:8px;padding:8px 12px;background:#eceef4}.actions .primary{background:#6254c9;color:#fff}.suggest{margin-top:9px;width:100%;padding:9px;border:1px solid #d8dae3;border-radius:8px}.composer{padding:12px 16px 18px}.receiver{font-size:12px;color:#6f7689;margin-bottom:6px}.input{padding:13px;border:1px solid #d8dae3;border-radius:12px;background:#fff;color:#8b91a1}.plan li{margin:5px 0}.standby{border-color:#cfc8f5}.danger{color:#b44242!important}.hint{position:fixed;left:235px;bottom:12px;padding:7px 10px;border-radius:8px;background:#202432;color:#fff;font-size:11px}
+    .app{grid-template-columns:220px minmax(480px,1fr) 7px 420px}.resize-handle{cursor:col-resize;background:#e4e7ee}.resize-handle:hover{background:#8172da}
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="side"><div class="brand">Interview Assistant</div><button class="new">＋ 新建会话</button><div class="label">最近会话</div><div class="thread">优化 Agent 简历<small>Resume Agent · 待审批</small></div></aside>
+  <main class="workspace">
+    <div class="work-head"><div><strong>0716_agent简历</strong><span>源简历只读 · 当前为 checkpoint 工作草稿</span></div><div class="badge">第 2 / 4 项</div></div>
+    <div class="tabs"><button class="active">全文源码 Diff</button><button>渲染对比</button></div>
+    <div class="doc">
+      <section class="section"><h2>个人简介</h2><div class="muted">后端开发工程师，熟悉 Python 与 FastAPI。</div></section>
+      <section class="section current"><h2>项目经历 · InterviewAssistant</h2><div class="muted">以下 Diff 位于完整源码的原位置：</div><div class="diff"><del>使用 LangGraph 编写了一个面试助手。</del><ins>基于 LangGraph 构建多智能体面试助手，拆分 Main、RAG 与 Resume 子图，并通过 checkpoint 与 Interrupt 支持可恢复的人机协作流程。</ins></div><div class="muted">后续原文继续正常展示，不截断全文。</div></section>
+      <section class="section"><h2>技能</h2><div class="muted">Python / FastAPI / React / LangGraph</div></section>
+    </div>
+  </main><div class="resize-handle" title="拖动调整简历与聊天宽度"></div>
+  <section class="chat">
+    <div class="chat-head"><h2>优化 Agent 简历</h2><span>Resume Agent 正在处理</span></div>
+    <div class="timeline">
+      <div class="agent"><div class="avatar">R</div><div><div class="bubble">我会按已确认计划逐条提出修改。已批准修改不能撤销，但可以在待命阶段放弃整份草稿。</div><div class="approval"><h3>修改 2 / 4 · 项目经历</h3><small>突出多智能体架构与可恢复交互能力</small><div class="actions"><button class="primary">接受修改</button><button>拒绝</button><button>提出建议</button></div><input class="suggest" placeholder="输入调整建议后提交" /></div></div></div>
+      <div class="agent"><div class="avatar">R</div><div class="approval plan"><h3>计划确认</h3><ol><li>强化项目架构描述</li><li>补充 RAG 检索职责</li><li>精简重复技能项</li></ol><div class="actions"><button class="primary">批准计划</button><button>调整计划</button></div></div></div>
+      <div class="agent"><div class="avatar">R</div><div class="approval standby"><h3>本轮修改已处理完毕</h3><small>仅在待命状态提供会话级退出操作</small><div class="actions"><button>继续修改</button><button class="primary">保存为新简历并退出</button><button class="danger">放弃草稿</button></div></div></div>
+    </div>
+    <div class="composer"><div class="receiver">发送给 Resume Agent</div><div class="input">输入新的修改要求…</div></div>
+  </section>
+</div>
+<div class="hint">交互状态示意：实际页面每次只展示当前一种 Interrupt 卡片</div>
+</body>
+</html>

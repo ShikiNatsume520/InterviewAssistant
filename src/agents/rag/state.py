@@ -29,6 +29,9 @@ class RawResult(TypedDict):
     content: str
     score: float
     source: str
+    resource_id: str
+    scope: str
+    display_name: str
 
 
 class Citation(TypedDict):
@@ -39,12 +42,18 @@ class Citation(TypedDict):
         start_line: 起始行号（1-based）。
         end_line: 结束行号（1-based）。
         content: 引用内容。
+        score: 归一化置信度，值域 (0, 1]。向量命中为 ``1/(1+dist)``，
+            grep 命中为词覆盖率（区间命中的独立词数 / 检索词总数）。
     """
 
     file_path: str
     start_line: int
     end_line: int
     content: str
+    score: float
+    resource_id: str
+    scope: str
+    display_name: str
 
 
 class RAGState(TypedDict, total=False):
@@ -64,6 +73,7 @@ class RAGState(TypedDict, total=False):
 
     search_query: str
     search_type: Literal["semantic", "keyword"]
+    principal_id: str
     raw_results: list[RawResult]
     citations_output: list[Citation]
     gap_topic: str | None

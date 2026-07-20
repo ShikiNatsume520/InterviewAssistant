@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>阶段 4A 指定简历原型</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #eef2f7; color: #273248; font: 14px system-ui, sans-serif; }
+  .demo { width: 760px; position: relative; }
+  .picker { position: absolute; left: 0; bottom: 86px; width: 430px; padding: 15px; border: 1px solid #d9e0ea; border-radius: 15px; background: white; box-shadow: 0 18px 55px #25304a26; }
+  h3 { margin: 0 0 12px; font-size: 15px; }
+  .drop { padding: 20px; border: 1.5px dashed #9eaed0; border-radius: 11px; text-align: center; color: #64738c; background: #f7f9fd; }
+  .drop strong { display: block; color: #5269da; margin-bottom: 4px; }
+  .list { margin-top: 12px; display: grid; gap: 7px; }
+  .item { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 10px; border-radius: 10px; border: 1px solid transparent; }
+  .item.selected { border-color: #8d9fea; background: #f0f3ff; }
+  .item small { display: block; color: #8a96a9; margin-top: 3px; }
+  .actions { display: flex; gap: 5px; }
+  button { border: 0; border-radius: 8px; padding: 7px 9px; cursor: pointer; }
+  .actions button { background: #edf1f6; color: #647188; font-size: 11px; }
+  .composer { padding: 11px; border: 1px solid #cbd5e2; border-radius: 15px; background: white; box-shadow: 0 8px 30px #1f2c4814; }
+  .chip { width: fit-content; margin-bottom: 8px; padding: 6px 9px; border-radius: 9px; background: #edf1ff; color: #4f63bf; font-size: 12px; }
+  .entry { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; }
+  .attach { color: #5269da; background: #edf1ff; }
+  textarea { border: 0; outline: 0; resize: none; padding: 8px; }
+  .send { background: #5269da; color: white; }
+</style>
+<div class="demo">
+  <section class="picker">
+    <h3>指定简历</h3>
+    <div class="drop"><strong>拖入 Markdown 简历</strong>或点击选择单个 .md 文件</div>
+    <div class="list">
+      <div class="item selected"><div>Agent 后端岗位简历<small>刚刚更新 · 后端简历.md</small></div><div class="actions"><button>重命名</button><button>下载</button><button>删除</button></div></div>
+      <div class="item"><div>实习简历<small>2026-07-10 · intern.md</small></div><div class="actions"><button>重命名</button><button>下载</button><button>删除</button></div></div>
+    </div>
+  </section>
+  <section class="composer">
+    <div class="chip">📄 Agent 后端岗位简历　×</div>
+    <div class="entry"><button class="attach">简历</button><textarea rows="2" placeholder="输入消息……">帮我优化多智能体项目经历</textarea><button class="send">发送</button></div>
+  </section>
+</div>

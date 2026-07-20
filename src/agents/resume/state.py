@@ -1,9 +1,12 @@
 """简历优化子图的状态与数据结构定义。
 
-Phase 5 的 ``ResumeState`` 是本子图的完整状态 schema，与 ``MainState`` 解耦。
-输入层由 ``intent`` + ``original_resume`` 构成，运行期维护
-``current_draft`` / ``last_draft`` + ``plan_steps`` 进度，输出靠 ``messages``
-携带 ``ToolMessage`` 退出子图。
+常驻编辑会话：``ResumeState`` 操作 ``resume_shot``（markdown 字符串），以 chat_node
+为唯一 LLM 决策点。edit_executor + approve_node 逐条小循环：chat_node 一波发多个
+grep_replace，edit_executor 取一条判断 grep，命中则 approve_node 显示 diff 请用户
+approve/reject/suggest，approve 即替换 shot 并取下一条，直到全部完成。
+
+子图**无长期记忆**：每次进入状态全重置（wrapper 用主图 thread 调用，interrupt
+期间状态在主图 checkpoint 的子图命名空间持久化）。
 """
 
 from __future__ import annotations
@@ -18,29 +21,49 @@ from typing_extensions import TypedDict
 class ResumeState(TypedDict, total=False):
     """简历优化子图的图状态。
 
-    输入层（由主图 wrapper 注入）：
-        intent: 用户修改简历的需求描述（主图 Router LLM 精炼后传入）。
-        original_resume: 原始简历文本（wrapper 从主图最近 HumanMessage 提取）。
+    输入层（由主图 wrapper 灌入）：
+        resume_id/source_display_name: 已完成归属校验的只读源简历标识。
+        user_request: 可选的最小用户诉求。
+        resume_session_id: 保存派生简历使用的稳定幂等键。
+        resume_shot: 从源正文复制的工作草稿，批准修改后即时替换。
 
     运行期：
-        current_draft: 当前草稿，CRUD 工具修改此字段。
-        last_draft: 上一步快照，``step_confirm`` 拒绝时恢复。
-        plan_steps: ``plan_node`` 产出的计划步骤列表。
-        steps_completed: 已完成步骤数（注入 react_router 的 system prompt）。
-        messages: ReAct 循环的 LLM / Tool 消息历史。
+        plan: plan_node 产出的修改计划（步骤列表），作 chat_node 决策参考。
+        plan_status: 计划控制工具所处阶段。
+        plan_feedback: 用户对计划的修改建议，不写入 messages。
+        plan_request_tool_call_id: 原始 request_plan tool_call ID；批准后用它返回
+            最终 ToolMessage，形成完整工具调用协议。
+        last_summary: chat_node 无 tool_call 时的总结文本，hitl_standby 展示并
+            退出时回传主图。
+        save: 退出意图。hitl_standby 收到前端结束信号时设置——``True`` 保存退出，
+            ``False`` 放弃。``route_after_hitl`` 据此决定走 ``persist_node`` 还是 END。
+        processed_edits: 已处理的 grep_replace ``tool_call_id`` 列表。edit_executor /
+            approve_node 据此跳过已处理条目，逐个推进小循环。chat_node 新发一波指令
+            是新 AIMessage（新 tool_call_id），自动覆盖旧波未执行的——edit_executor
+            只从最近带 grep_replace 的 AIMessage 提取，旧波不再处理。
+        approve_decision: approve_node 的路由信号（``"approve"`` / ``"reject"`` /
+            ``"suggest"``），``route_after_approve`` 据此分流。
+        messages: 对话消息历史（含首条用户 HumanMessage + chat_node AIMessage +
+            EditError / user refuse / 修改完毕 等 HumanMessage）。
+
+    chat_node 文本**不存 state**——流式范式下由 ``astream(subgraphs=True)`` 实时
+    推前端 token（ns=resume_agent），interrupt payload 不带 LLM 文本。
     """
 
-    intent: str
-    original_resume: str
-    current_draft: str
-    last_draft: str
-    plan_steps: list[str]
-    steps_completed: int
+    resume_id: str
+    source_display_name: str
+    user_request: str | None
+    resume_session_id: str
+    resume_shot: str
+    plan: list[str]
+    plan_status: Literal["none", "draft", "approved"]
+    plan_feedback: str
+    plan_request_tool_call_id: str | None
+    last_summary: str
+    save: bool
+    outcome: str
+    output_resume_id: str | None
+    output_display_name: str | None
+    processed_edits: list[str]
+    approve_decision: str
     messages: Annotated[list[BaseMessage], add_messages]
-
-
-class PlanConfirmResult(TypedDict, total=False):
-    """``plan_confirm_node`` interrupt 后用户回复的解析结构。"""
-
-    decision: Literal["approve", "suggest"]
-    suggestion: str

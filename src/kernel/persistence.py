@@ -27,6 +27,9 @@ CHECKPOINT_DB_PATH: Path = PROJECT_ROOT / "data" / "state" / "checkpoints.sqlite
 STORE_DB_PATH: Path = PROJECT_ROOT / "data" / "state" / "store.sqlite"
 """长期记忆 Store 数据库（按 user_id 键控）。"""
 
+APP_DB_PATH: Path = PROJECT_ROOT / "data" / "state" / "app.sqlite"
+"""游客/开发人员 Session、Thread 元数据与活动任务数据库。"""
+
 
 def _ensure_parent(path: Path) -> None:
     """确保 db 文件所在目录存在（SqliteSaver/SqliteStore 不会自动建目录）。"""

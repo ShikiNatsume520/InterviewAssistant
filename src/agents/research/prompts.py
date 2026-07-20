@@ -6,6 +6,12 @@ R3 重构：把 ``OUTLINE_PROMPT`` / ``DISTILL_PROMPT`` / ``FINALIZE_PROMPT``（
 
 from __future__ import annotations
 
+MAIN_AGENT_GUIDANCE: str = """### Research Agent
+
+Research Agent只用于补足 RAG Agent明确发现的本地知识缺口。联网深研是高成本外部流程；Main Agent必须先向用户说明知识缺口并获得明确同意，之后才能委托 Research Agent。不要用它替代普通本地检索。
+
+Research Agent负责计划确认、网页搜索、资料提炼、报告展示和知识库授权确认。其 ToolMessage只返回精简结果元数据；完整报告已经由 Research Agent在聊天区展示，Main Agent不要重复生成报告全文，也不得把“用户批准入库”描述成“已经完成索引”。"""
+
 _OUTLINE_PROMPT_TEMPLATE: str = """你是深研检索规划师。给定知识缺口主题，生成 3-5 个**互补的**检索词，
 用于在 DuckDuckGo 上多角度搜集资料补足该缺口。
 

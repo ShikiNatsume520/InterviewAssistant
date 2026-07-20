@@ -15,18 +15,23 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from agents.index.scope import KnowledgeScopeKind, resolve_knowledge_scope
 from agents.index.state import IndexAgentState, IndexRow
 from agents.index.tools.chunking import read_and_chunk
 from agents.index.tools.index_io import load_existing_index, write_index
 from agents.index.tools.llm_index import build_llm, update_index_via_llm
 from agents.index.tools.vectorstore import make_persistent_client, upsert_chunks
-from kernel.paths import CHROMA_PATH, INDEX_MD_PATH, MARKDOWN_DIR
-
-_llm = build_llm()
-"""模块级 LLM 实例（避免每次节点调用重建，复用连接）。"""
 
 
-def _resolve_target_files(target_files: list[str]) -> list[Path]:
+def _scope(state: IndexAgentState) -> Any:
+    kind: KnowledgeScopeKind = (
+        "personal" if state.get("scope") == "personal" else "public"
+    )
+    principal_id = state.get("principal_id") or None
+    return resolve_knowledge_scope(kind, principal_id)
+
+
+def _resolve_target_files(state: IndexAgentState) -> list[Path]:
     """把文件名列表解析为存在的 markdown 文件 Path 列表（跳过不存在者）。
 
     Args:
@@ -36,8 +41,9 @@ def _resolve_target_files(target_files: list[str]) -> list[Path]:
         在 MARKDOWN_DIR 下真实存在的文件 Path 列表。
     """
     out: list[Path] = []
-    for name in target_files:
-        fp = MARKDOWN_DIR / name
+    scope = _scope(state)
+    for name in state.get("target_files", []):
+        fp = scope.documents_dir / Path(name).name
         if fp.exists():
             out.append(fp)
     return out
@@ -54,7 +60,7 @@ def scan_node(state: IndexAgentState) -> dict[str, Any]:
     Returns:
         更新 existing_rows（现有索引行，无 index.md 时为空）。
     """
-    existing = load_existing_index(INDEX_MD_PATH)
+    existing = load_existing_index(_scope(state).index_path)
     return {"existing_rows": existing}
 
 
@@ -67,8 +73,7 @@ def chunk_node(state: IndexAgentState) -> dict[str, Any]:
     Returns:
         更新 chunks（Chunk 列表）。
     """
-    target_files = state.get("target_files", [])
-    paths = _resolve_target_files(target_files)
+    paths = _resolve_target_files(state)
     chunks = []
     for fp in paths:
         chunks.extend(read_and_chunk(fp))
@@ -85,8 +90,9 @@ def embed_node(state: IndexAgentState) -> dict[str, Any]:
         空 dict（灌库副作用写入 Chroma，不更新 state 字段）。
     """
     chunks = state.get("chunks", [])
-    client = make_persistent_client(CHROMA_PATH)
-    upsert_chunks(client, chunks)
+    scope = _scope(state)
+    client = make_persistent_client(scope.chroma_path)
+    upsert_chunks(client, chunks, scope.collection_name)
     return {}
 
 
@@ -101,7 +107,7 @@ async def llm_index_node(state: IndexAgentState) -> dict[str, Any]:
     """
     existing: list[IndexRow] = state.get("existing_rows", [])
     chunks = state.get("chunks", [])
-    update = await update_index_via_llm(_llm, existing, chunks)
+    update = await update_index_via_llm(build_llm(), existing, chunks)
     return {"index_update": update}
 
 
@@ -116,7 +122,9 @@ def write_index_node(state: IndexAgentState) -> dict[str, Any]:
     """
     update = state.get("index_update")
     if update is not None:
-        write_index(INDEX_MD_PATH, update.rows)
+        scope = _scope(state)
+        scope.index_path.parent.mkdir(parents=True, exist_ok=True)
+        write_index(scope.index_path, update.rows)
     return {}
 
 
